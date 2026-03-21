@@ -1,22 +1,48 @@
 name: Release
 
+# Auto-release on every push to main (like llama.cpp)
 on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create new release'
+        required: true
+        type: boolean
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+    paths:
+      - '**/*.swift'
+      - 'Package.swift'
+      - '.github/workflows/release.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  build-and-release:
     runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for build number
 
       - name: Install Metal Toolchain
         run: xcodebuild -downloadComponent MetalToolchain || true
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          BUILD_NUMBER="$(git rev-list --count HEAD)"
+          SHORT_HASH="$(git rev-parse --short=7 HEAD)"
+          echo "name=b${BUILD_NUMBER}" >> $GITHUB_OUTPUT
+          echo "full=b${BUILD_NUMBER}-${SHORT_HASH}" >> $GITHUB_OUTPUT
+          echo "Build: b${BUILD_NUMBER} (${SHORT_HASH})"
 
       - name: Build (Release)
         run: swift build -c release
@@ -25,35 +51,44 @@ jobs:
         run: |
           ls -lh .build/release/mlx-server
           file .build/release/mlx-server
-
-      - name: Get version
-        id: version
-        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          .build/release/mlx-server --help || true
 
       - name: Package binary
         run: |
-          mkdir -p dist
-          cp .build/release/mlx-server dist/
-          cp LICENSE README.md dist/
-          cd dist && tar -czvf ../mlx-server-${{ steps.version.outputs.tag }}-macos-arm64.tar.gz .
+          mkdir -p release
+          cp .build/release/mlx-server release/
+          cp LICENSE README.md release/
+          cd release
+          tar -czvf ../mlx-server-${{ steps.tag.outputs.name }}-macos-arm64.tar.gz .
 
-      - name: Create GitHub Release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlx-server-${{ steps.tag.outputs.name }}-macos-arm64
+          path: mlx-server-${{ steps.tag.outputs.name }}-macos-arm64.tar.gz
+          retention-days: 90
+
+      - name: Create release
+        if: ${{ github.event_name == 'push' || github.event.inputs.create_release == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
-          name: "mlx-server ${{ steps.version.outputs.tag }}"
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: "mlx-server ${{ steps.tag.outputs.name }}"
           body: |
-            ## mlx-server ${{ steps.version.outputs.tag }}
+            ## mlx-server ${{ steps.tag.outputs.full }}
 
             Native Swift MLX server with OpenAI-compatible API for Apple Silicon.
 
-            ### Installation
+            **Commit:** ${{ github.sha }}
+
+            ### Quick Start
             ```bash
-            tar -xzf mlx-server-${{ steps.version.outputs.tag }}-macos-arm64.tar.gz
+            tar -xzf mlx-server-${{ steps.tag.outputs.name }}-macos-arm64.tar.gz
             ./mlx-server --model mlx-community/Qwen2.5-3B-Instruct-4bit --port 5413
             ```
 
-            > **Note:** You need `mlx.metallib` next to the binary. See README for instructions.
+            > **Note:** Requires `mlx.metallib` next to the binary for GPU compute. See [README](https://github.com/SharpAI/mlx-server#metal-shader-library) for setup.
           files: |
-            mlx-server-${{ steps.version.outputs.tag }}-macos-arm64.tar.gz
+            mlx-server-${{ steps.tag.outputs.name }}-macos-arm64.tar.gz
           draft: false
           prerelease: false

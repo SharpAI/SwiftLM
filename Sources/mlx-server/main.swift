@@ -51,6 +51,9 @@ struct MLXServer: AsyncParsableCommand {
     @Option(name: .long, help: "Number of parallel request slots")
     var parallel: Int = 1
 
+    @Flag(name: .long, help: "Enable thinking/reasoning mode (Qwen3.5 etc). Default: disabled")
+    var thinking: Bool = false
+
     mutating func run() async throws {
         print("[mlx-server] Loading model: \(model)")
         let modelId = model
@@ -72,6 +75,7 @@ struct MLXServer: AsyncParsableCommand {
         let defaultTemp = self.temp
         let defaultTopP = self.topP
         let defaultRepeatPenalty = self.repeatPenalty
+        let thinkingEnabled = self.thinking
         let parallelSlots = self.parallel
 
         // ── Concurrency limiter ──
@@ -141,7 +145,10 @@ struct MLXServer: AsyncParsableCommand {
             // ── Acquire slot (concurrency limiter) ──
             await semaphore.wait()
 
-            let userInput = UserInput(chat: chatMessages)
+            // Pass enable_thinking to the Jinja chat template via additionalContext
+            // (mirrors llama-server's --chat-template-kwargs '{"enable_thinking":false}')
+            let templateContext: [String: any Sendable]? = thinkingEnabled ? nil : ["enable_thinking": false]
+            let userInput = UserInput(chat: chatMessages, additionalContext: templateContext)
             let lmInput = try await container.prepare(input: userInput)
             let stream = try await container.generate(input: lmInput, parameters: params)
 

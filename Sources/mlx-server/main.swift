@@ -190,8 +190,11 @@ struct MLXServer: AsyncParsableCommand {
                     var toolCallIndex = 0
                     for await generation in stream {
                         switch generation {
-                        case .chunk(let text):
-                            cont.yield(sseChunk(modelId: modelId, delta: text, finishReason: nil))
+                        case .chunk(let rawText):
+                            let text = sanitizeOutput(rawText)
+                            if !text.isEmpty {
+                                cont.yield(sseChunk(modelId: modelId, delta: text, finishReason: nil))
+                            }
                         case .toolCall(let tc):
                             hasToolCalls = true
                             let argsJson = serializeToolCallArgs(tc.function.arguments)
@@ -220,8 +223,8 @@ struct MLXServer: AsyncParsableCommand {
                 var tcIndex = 0
                 for await generation in stream {
                     switch generation {
-                    case .chunk(let text):
-                        fullText += text
+                    case .chunk(let rawText):
+                        fullText += sanitizeOutput(rawText)
                         completionTokenCount += 1
                     case .toolCall(let tc):
                         let argsJson = serializeToolCallArgs(tc.function.arguments)
@@ -345,6 +348,21 @@ actor AsyncSemaphore {
 
 func jsonHeaders() -> HTTPFields {
     HTTPFields([HTTPField(name: .contentType, value: "application/json")])
+}
+
+/// Strip model-specific special tokens that leak into generation output.
+/// Handles: <|channel|>...<|message|>, <|end|>, <|start|>assistant, <think>...</think>
+func sanitizeOutput(_ text: String) -> String {
+    var result = text
+    // Strip <|channel|>...<|message|> routing prefixes (e.g. gpt-oss)
+    if let range = result.range(of: #"<\|channel\|>.*?<\|message\|>"#, options: .regularExpression) {
+        result.removeSubrange(range)
+    }
+    // Strip remaining <|...|> special tokens
+    result = result.replacingOccurrences(of: #"<\|[^|]+\|>"#, with: "", options: .regularExpression)
+    // Strip <think>...</think> blocks (fallback if enable_thinking didn't suppress them)
+    result = result.replacingOccurrences(of: #"<think>[\s\S]*?</think>"#, with: "", options: .regularExpression)
+    return result
 }
 
 func sseHeaders() -> HTTPFields {

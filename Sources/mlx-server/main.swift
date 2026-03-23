@@ -218,8 +218,8 @@ struct MLXServer: AsyncParsableCommand {
                     var toolCallIndex = 0
                     for await generation in stream {
                         switch generation {
-                        case .chunk(let rawText):
-                            let text = filter.process(rawText)
+                        case .chunk(let rawText, let tokenId):
+                            let text = filter.process(rawText, tokenId: tokenId)
                             if !text.isEmpty {
                                 cont.yield(sseChunk(modelId: modelId, delta: text, finishReason: nil))
                             }
@@ -254,8 +254,8 @@ struct MLXServer: AsyncParsableCommand {
                 let filter = OutputFilter()
                 for await generation in stream {
                     switch generation {
-                    case .chunk(let rawText):
-                        fullText += filter.process(rawText)
+                    case .chunk(let rawText, let tokenId):
+                        fullText += filter.process(rawText, tokenId: tokenId)
                         completionTokenCount += 1
                     case .toolCall(let tc):
                         let argsJson = serializeToolCallArgs(tc.function.arguments)
@@ -381,58 +381,67 @@ func jsonHeaders() -> HTTPFields {
     HTTPFields([HTTPField(name: .contentType, value: "application/json")])
 }
 
-/// Stateful output filter for models like gpt-oss that emit structured channels.
+/// Stateful output filter using raw token IDs for gpt-oss channel detection.
 ///
-/// gpt-oss output format (each token arrives as a separate streaming chunk):
-///   <|channel|> analysis <|message|> [thinking text...] <|end|>
-///   <|start|> assistant <|channel|> final <|message|> [actual response] <|end|>
+/// gpt-oss emits structured channels via special token IDs:
+///   200005(<|channel|>) → channel_name → 200008(<|message|>) → [content] → 200007(<|end|>) → ...
 ///
-/// This filter suppresses EVERYTHING until the final <|message|> before actual content.
+/// The filter tracks which channel we're in (analysis vs final) at the token ID level,
+/// matching llama-server's approach. For non-gpt-oss models, all token IDs are < 200000
+/// so the filter passes everything through transparently.
 class OutputFilter {
+    // gpt-oss special token IDs
+    private static let channelToken = 200005   // <|channel|>
+    private static let startToken   = 200006   // <|start|>
+    private static let endToken     = 200007   // <|end|>
+    private static let messageToken = 200008   // <|message|>
+
     private enum Phase {
-        case preamble       // Before any content — suppress everything
-        case skipRole       // Just saw <|start|>, next token is role name — skip it
-        case channelName    // Saw <|channel|> after role, next token is channel name — skip it
-        case waitMessage    // Saw channel name, waiting for <|message|> to start emitting
-        case emitting       // Past all markers — emit actual content
+        case emitting       // Default: pass text through (also initial state for non-gpt-oss)
+        case suppressing    // Inside analysis channel content — drop everything
+        case channelName    // Just saw <|channel|>, next text token is the channel name
+        case waitMessage    // Saw channel name, waiting for <|message|>
     }
 
-    private var phase: Phase = .preamble
+    private var phase: Phase = .emitting
+    private var isAnalysisChannel = false
 
-    func process(_ text: String) -> String {
-        let isSpecial = text.contains("<|") && text.contains("|>")
-
-        if isSpecial {
-            if text.contains("<|start|>") {
-                phase = .skipRole
-                return ""
-            }
-            if text.contains("<|channel|>") {
-                phase = .channelName
-                return ""
-            }
-            if text.contains("<|message|>") {
-                phase = .emitting
-                return ""
-            }
-            // All other special tokens — drop silently
+    func process(_ text: String, tokenId: Int) -> String {
+        // Handle special token IDs (gpt-oss structure)
+        switch tokenId {
+        case Self.channelToken:
+            phase = .channelName
             return ""
+        case Self.startToken:
+            // <|start|> followed by role name — suppress the role name
+            phase = .suppressing
+            return ""
+        case Self.endToken:
+            // End of current channel content
+            if isAnalysisChannel {
+                phase = .suppressing  // stay suppressed until next <|channel|>
+            }
+            return ""
+        case Self.messageToken:
+            // <|message|> opens the content for the current channel
+            phase = isAnalysisChannel ? .suppressing : .emitting
+            return ""
+        default:
+            break
         }
 
+        // Handle text based on current phase
         switch phase {
-        case .preamble:
-            return ""
-        case .skipRole:
-            // "assistant" role token — skip, stay alert for <|channel|>
-            phase = .preamble  // back to suppressing until next special token
-            return ""
         case .channelName:
-            // "final" or "analysis" etc — skip channel name
+            // This text token is the channel name ("analysis", "final", etc.)
+            let name = text.trimmingCharacters(in: .whitespaces)
+            isAnalysisChannel = (name == "analysis" || name == "commentary")
             phase = .waitMessage
             return ""
-        case .waitMessage:
+        case .waitMessage, .suppressing:
             return ""
         case .emitting:
+            // Strip <think>...</think> tags as fallback for other models
             var result = text
             result = result.replacingOccurrences(of: "<think>", with: "")
             result = result.replacingOccurrences(of: "</think>", with: "")

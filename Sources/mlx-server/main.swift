@@ -12,6 +12,7 @@ import ArgumentParser
 import Foundation
 import HTTPTypes
 import Hummingbird
+import MLX
 import MLXLLM
 import MLXLMCommon
 
@@ -54,7 +55,19 @@ struct MLXServer: AsyncParsableCommand {
     @Flag(name: .long, help: "Enable thinking/reasoning mode (Qwen3.5 etc). Default: disabled")
     var thinking: Bool = false
 
+    @Option(name: .long, help: "Microseconds to yield between tokens (0 = max perf, 50-100 = smooth UI)")
+    var gpuYieldUs: UInt32 = 50
+
+    @Option(name: .long, help: "GPU memory cache limit in MB (0 = unlimited)")
+    var cacheLimitMb: Int = 256
+
     mutating func run() async throws {
+        // ── GPU memory tuning ──
+        if cacheLimitMb > 0 {
+            Memory.cacheLimit = cacheLimitMb * 1024 * 1024
+            print("[mlx-server] GPU cache limit: \(cacheLimitMb) MB")
+        }
+
         print("[mlx-server] Loading model: \(model)")
         // Clean model name for API responses: if it's a filesystem path,
         // extract last 2 path components (e.g. "mlx-community/Qwen3.5-9B-MLX-4bit")
@@ -103,6 +116,7 @@ struct MLXServer: AsyncParsableCommand {
         let defaultRepeatPenalty = self.repeatPenalty
         let thinkingEnabled = self.thinking
         let parallelSlots = self.parallel
+        let gpuYield = self.gpuYieldUs
 
         // ── Concurrency limiter ──
         let semaphore = AsyncSemaphore(limit: parallelSlots)
@@ -205,6 +219,8 @@ struct MLXServer: AsyncParsableCommand {
                             if !text.isEmpty {
                                 cont.yield(sseChunk(modelId: modelId, delta: text, finishReason: nil))
                             }
+                            // Yield GPU time to WindowServer (prevents UI freeze)
+                            if gpuYield > 0 { usleep(gpuYield) }
                         case .toolCall(let tc):
                             hasToolCalls = true
                             let argsJson = serializeToolCallArgs(tc.function.arguments)

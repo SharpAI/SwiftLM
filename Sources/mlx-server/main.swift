@@ -128,6 +128,7 @@ struct MLXServer: AsyncParsableCommand {
 
         // Chat completions
         router.post("/v1/chat/completions") { request, _ -> Response in
+          do {
             var bodyBuffer = try await request.body.collect(upTo: 10 * 1024 * 1024)
             let bodyBytes = bodyBuffer.readBytes(length: bodyBuffer.readableBytes) ?? []
             let bodyData = Data(bodyBytes)
@@ -151,10 +152,11 @@ struct MLXServer: AsyncParsableCommand {
 
             // Convert request messages → Chat.Message
             let chatMessages: [Chat.Message] = chatReq.messages.compactMap { msg in
+                let text = msg.content ?? ""
                 switch msg.role {
-                case "system":    return .system(msg.content)
-                case "assistant": return .assistant(msg.content)
-                default:          return .user(msg.content)
+                case "system":    return .system(text)
+                case "assistant": return .assistant(text)
+                default:          return .user(text)
                 }
             }
 
@@ -236,7 +238,7 @@ struct MLXServer: AsyncParsableCommand {
                 await semaphore.signal()
 
                 // Approximate prompt tokens (chars / 4 is a reasonable heuristic for most tokenizers)
-                let promptText = chatReq.messages.map { $0.content }.joined(separator: " ")
+                let promptText = chatReq.messages.map { $0.content ?? "" }.joined(separator: " ")
                 let estimatedPromptTokens = max(1, promptText.count / 4)
                 let totalTokens = estimatedPromptTokens + completionTokenCount
 
@@ -265,6 +267,16 @@ struct MLXServer: AsyncParsableCommand {
                     body: .init(byteBuffer: ByteBuffer(data: encoded))
                 )
             }
+          } catch {
+              print("[mlx-server] Chat completion error: \(error)")
+              let errMsg = String(describing: error).replacingOccurrences(of: "\"", with: "\\\"")
+              let errJson = "{\"error\":{\"message\":\"\(errMsg)\",\"type\":\"server_error\"}}"
+              return Response(
+                  status: .internalServerError,
+                  headers: jsonHeaders(),
+                  body: .init(byteBuffer: ByteBuffer(string: errJson))
+              )
+          }
         }
 
         // ── Start server ──
@@ -408,7 +420,7 @@ func serializeToolCallArgs(_ args: [String: JSONValue]) -> String {
 struct ChatCompletionRequest: Decodable {
     struct Message: Decodable {
         let role: String
-        let content: String
+        let content: String?
     }
     struct ToolDef: Decodable {
         let type: String

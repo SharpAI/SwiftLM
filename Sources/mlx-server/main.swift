@@ -570,6 +570,10 @@ func handleChatStreaming(
             case .chunk(let text):
                 completionTokenCount += 1
                 fullText += text
+                // GPU yield: prevent Metal from starving macOS WindowServer
+                if completionTokenCount % 8 == 0 {
+                    try? await Task.sleep(for: .microseconds(50))
+                }
                 // ── Stop sequence check ──
                 if let (trimmedText, _) = checkStopSequences(fullText, stopSequences: stopSequences) {
                     let emittedSoFar = fullText.count - text.count
@@ -637,6 +641,10 @@ func handleChatNonStreaming(
         case .chunk(let text):
             fullText += text
             completionTokenCount += 1
+            // GPU yield: prevent Metal from starving macOS WindowServer
+            if completionTokenCount % 8 == 0 {
+                try? await Task.sleep(for: .microseconds(50))
+            }
         case .toolCall(let tc):
             let argsJson = serializeToolCallArgs(tc.function.arguments)
             collectedToolCalls.append(ToolCallResponse(
@@ -777,6 +785,10 @@ func handleTextStreaming(
             case .chunk(let text):
                 completionTokenCount += 1
                 fullText += text
+                // GPU yield: prevent Metal from starving macOS WindowServer
+                if completionTokenCount % 8 == 0 {
+                    try? await Task.sleep(for: .microseconds(50))
+                }
                 if let (trimmedText, _) = checkStopSequences(fullText, stopSequences: stopSequences) {
                     let emittedSoFar = fullText.count - text.count
                     if trimmedText.count > emittedSoFar {
@@ -830,6 +842,10 @@ func handleTextNonStreaming(
         case .chunk(let text):
             fullText += text
             completionTokenCount += 1
+            // GPU yield: prevent Metal from starving macOS WindowServer
+            if completionTokenCount % 8 == 0 {
+                try? await Task.sleep(for: .microseconds(50))
+            }
         case .toolCall, .info:
             break
         }

@@ -42,9 +42,23 @@ jobs:
           key: mlx-model-qwen2.5-0.5b-4bit
 
       - name: Run E2E tests
+        env:
+          HF_HUB_DOWNLOAD_TIMEOUT: "120"
         run: |
           chmod +x tests/test-server.sh
-          tests/test-server.sh .build/release/mlx-server 15413
+          # Retry up to 2 times for transient HuggingFace download failures
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt of 3..."
+            if tests/test-server.sh .build/release/mlx-server 15413; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Test failed, retrying in 10s..."
+              sleep 10
+            fi
+          done
+          echo "All attempts failed"
+          exit 1
 
       - name: Upload test logs on failure
         if: failure()

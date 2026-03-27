@@ -37,6 +37,15 @@
       }
     },
     {
+      "identity" : "mlx-swift-lm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/SharpAI/mlx-swift-lm",
+      "state" : {
+        "branch" : "main",
+        "revision" : "a8309389b1dfdf38172f616d0a4172f4d3593f49"
+      }
+    },
+    {
       "identity" : "swift-algorithms",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-algorithms.git",

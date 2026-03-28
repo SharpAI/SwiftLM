@@ -76,6 +76,9 @@ struct MLXServer: AsyncParsableCommand {
     @Option(name: .long, help: "Allowed CORS origin (* for all, or a specific origin URL)")
     var cors: String?
 
+    @Flag(name: .long, help: "Force re-calibration of optimal memory settings (normally auto-cached)")
+    var calibrate: Bool = false
+
     mutating func run() async throws {
         print("[mlx-server] Loading model: \(model)")
         let modelId = model
@@ -190,6 +193,25 @@ struct MLXServer: AsyncParsableCommand {
             }
         }
 
+        // ── Auto-calibration (Wisdom system) ──
+        if let plan = partitionPlan {
+            if self.calibrate {
+                // Force re-calibration
+                if let wisdom = try? await Calibrator.calibrate(
+                    container: container, plan: plan, modelId: modelId,
+                    contextSize: self.ctxSize ?? 4096
+                ) {
+                    Memory.cacheLimit = wisdom.cacheLimit
+                }
+            } else if let wisdom = Calibrator.loadWisdom(modelId: modelId) {
+                // Load cached wisdom
+                if wisdom.cacheLimit > 0 {
+                    Memory.cacheLimit = wisdom.cacheLimit
+                }
+                print("[mlx-server] 📊 Loaded wisdom: \(String(format: "%.1f", wisdom.tokPerSec)) tok/s, cache=\(wisdom.cacheLimit / (1024*1024))MB (calibrated \(wisdom.calibratedAt.formatted(.relative(presentation: .named))))")
+            }
+        }
+
         print("[mlx-server] Model loaded. Starting HTTP server on \(host):\(port)")
 
         // ── Capture CLI defaults into a shared config ──
@@ -208,12 +230,12 @@ struct MLXServer: AsyncParsableCommand {
         let corsOrigin = self.cors
         let apiKeyValue = self.apiKey
 
-        // ── Memory limit enforcement ──
+        // ── Memory limit enforcement (overrides wisdom) ──
         if let memLimitMB = self.memLimit {
             let bytes = memLimitMB * 1024 * 1024
             Memory.memoryLimit = bytes
             Memory.cacheLimit = bytes
-            print("[mlx-server] Memory limit set to \(memLimitMB)MB")
+            print("[mlx-server] Memory limit set to \(memLimitMB)MB (overrides wisdom)")
         }
 
         // ── Concurrency limiter ──

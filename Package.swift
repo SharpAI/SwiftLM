@@ -5,10 +5,10 @@ let package = Package(
     name: "mlx-server",
     platforms: [.macOS(.v14)],
     dependencies: [
-        // Apple MLX Swift — core inference engine (Apple-maintained, tagged releases)
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
+        // Local Apple MLX Swift fork for C++ extensions
+        .package(path: "./LocalPackages/mlx-swift"),
         // Apple's LLM library built on MLX Swift (SharpAI fork — with GPU/CPU layer partitioning)
-        .package(url: "https://github.com/SharpAI/mlx-swift-lm", branch: "main"),
+        .package(path: "./mlx-swift-lm"),
         // HuggingFace tokenizers + model download
         .package(url: "https://github.com/huggingface/swift-transformers", .upToNextMinor(from: "1.2.0")),
         // Lightweight HTTP server (Apple-backed Swift server project)

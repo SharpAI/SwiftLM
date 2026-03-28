@@ -192,6 +192,9 @@ struct MLXServer: AsyncParsableCommand {
     @Flag(name: .long, help: "Enable SSD expert streaming for MoE models (Flash-MoE style memory-mapping)")
     var streamExperts: Bool = false
 
+    @Option(name: .long, help: "Chunk size for prefill evaluation (default: 512, lower to prevent GPU timeout on large models)")
+    var prefillSize: Int = 512
+
     mutating func run() async throws {
         print("[mlx-server] Loading model: \(model)")
         let modelId = model
@@ -357,7 +360,8 @@ struct MLXServer: AsyncParsableCommand {
             topP: self.topP,
             repeatPenalty: self.repeatPenalty,
             thinking: self.thinking,
-            isVision: isVision
+            isVision: isVision,
+            prefillSize: self.prefillSize
         )
 
         let parallelSlots = self.parallel
@@ -585,6 +589,7 @@ struct ServerConfig: Sendable {
     let repeatPenalty: Float?
     let thinking: Bool
     let isVision: Bool
+    let prefillSize: Int
 }
 
 // ── Model Directory Resolution ───────────────────────────────────────────────
@@ -759,7 +764,8 @@ func handleChatCompletion(
         maxKVSize: config.ctxSize,
         temperature: temperature,
         topP: topP,
-        repetitionPenalty: repeatPenalty
+        repetitionPenalty: repeatPenalty,
+        prefillStepSize: config.prefillSize
     )
 
     // ── Seed for deterministic generation ──
@@ -1067,7 +1073,8 @@ func handleTextCompletion(
         maxKVSize: config.ctxSize,
         temperature: temperature,
         topP: topP,
-        repetitionPenalty: repeatPenalty
+        repetitionPenalty: repeatPenalty,
+        prefillStepSize: config.prefillSize
     )
 
     if let seed = compReq.seed {

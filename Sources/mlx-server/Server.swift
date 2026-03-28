@@ -23,20 +23,63 @@ import MLXVLM
 
 final class ProgressTracker {
     var lastUpdate: TimeInterval = 0
+    var lastBytes: Int64 = 0
+    var speedStr = "0.0 MB/s"
     var isDone = false
     var spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     var frameIndex = 0
+    let modelId: String
+    
+    init(modelId: String) {
+        self.modelId = modelId
+    }
+    
+    func getDownloadedBytes() -> Int64 {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let folderName = "models--" + modelId.replacingOccurrences(of: "/", with: "--")
+        let modelHubDir = home.appendingPathComponent(".cache/huggingface/hub/\(folderName)")
+        let downloadDir = home.appendingPathComponent(".cache/huggingface/download")
+        
+        func sumDir(_ dir: URL) -> Int64 {
+            var total: Int64 = 0
+            if let enumerator = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) {
+                for case let file as URL in enumerator {
+                    // Quick check to skip symlinks from inflating size
+                    if let attr = try? file.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]),
+                       let size = attr.fileSize,
+                       attr.isSymbolicLink != true {
+                        total += Int64(size)
+                    }
+                }
+            }
+            return total
+        }
+        
+        return sumDir(modelHubDir) + sumDir(downloadDir)
+    }
     
     func printProgress(_ progress: Progress) {
         if isDone { return }
         let now = Date().timeIntervalSince1970
         let fraction = progress.fractionCompleted
         
-        if lastUpdate == 0 { lastUpdate = now }
+        if lastUpdate == 0 { 
+            lastUpdate = now
+            lastBytes = getDownloadedBytes()
+        }
         let interval = now - lastUpdate
         
-        if interval > 0.1 {
+        if interval > 0.5 {
             frameIndex = (frameIndex + 1) % spinnerFrames.count
+            
+            let currentBytes = getDownloadedBytes()
+            let diff = Double(currentBytes - lastBytes)
+            if diff >= 0 {
+                let speedMBps = (diff / interval) / 1_048_576.0
+                speedStr = String(format: "%.1f MB/s", speedMBps)
+            }
+            
+            lastBytes = currentBytes
             lastUpdate = now
         }
         
@@ -56,12 +99,11 @@ final class ProgressTracker {
         
         let pctStr = String(format: "%3d%%", pct)
         let spinner = spinnerFrames[frameIndex]
+        let speedText = "| Speed: \(speedStr)"
         
-        // If the library properly bubbled up throughput or total bytes, we'd show it,
-        // but swift-transformers aggregated Progress uses abstract units (e.g. 100 for total).
-        let msg = String(format: "\r[mlx-server] Download: [%@] %@ %@", bars, pctStr, spinner)
+        let msg = String(format: "\r[mlx-server] Download: [%@] %@ %@ %@", bars, pctStr, spinner, speedText)
         
-        print(msg.padding(toLength: 80, withPad: " ", startingAt: 0), terminator: "")
+        print(msg.padding(toLength: 90, withPad: " ", startingAt: 0), terminator: "")
         fflush(stdout)
         
         if fraction >= 1.0 {
@@ -220,7 +262,14 @@ struct MLXServer: AsyncParsableCommand {
 
         let isVision = self.vision
         let container: ModelContainer
-        let tracker = ProgressTracker()
+        
+        // Handle getting the simple model ID string for the tracker
+        let resolvedModelId: String = {
+            if case .id(let idStr, _) = modelConfig.id { return idStr }
+            return self.model
+        }()
+        let tracker = ProgressTracker(modelId: resolvedModelId)
+        
         if isVision {
             print("[mlx-server] Loading VLM (vision-language model)...")
             container = try await VLMModelFactory.shared.loadContainer(

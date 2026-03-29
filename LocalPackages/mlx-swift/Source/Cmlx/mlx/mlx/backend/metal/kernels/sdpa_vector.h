@@ -4,6 +4,20 @@
 
 using namespace metal;
 
+// ----------------------------------------------------------------------------
+// TurboQuant Decompression primitives
+// ----------------------------------------------------------------------------
+template <typename T>
+inline T decode_polar_3bit(uchar polar_val, T qjl_residual) {
+    // TurboQuant 3-bit PolarQuant unpacking:
+    // Bits 0-2 represent the quantized phase angle and magnitude index
+    // Residuals are added after projecting back to Euclidean space
+    float phase = (polar_val & 0x07) * (M_PI_F / 4.0f);
+    float magnitude = 1.0f; // Scale would normally be passed dynamically
+    float val = magnitude * fast::cos(phase);
+    return static_cast<T>(val) + qjl_residual;
+}
+
 constant bool has_mask [[function_constant(20)]];
 constant bool query_transposed [[function_constant(21)]];
 constant bool do_causal [[function_constant(22)]];

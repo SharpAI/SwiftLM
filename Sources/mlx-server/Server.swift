@@ -223,6 +223,18 @@ struct MLXServer: AsyncParsableCommand {
         // ── Pre-load profiling ──
         // Resolve model directory for profiling (checks HuggingFace cache)
         let modelDirectory = resolveModelDirectory(modelId: modelId)
+        
+        if self.streamExperts, let modelDir = modelDirectory {
+            setenv("EXPERIMENTAL_SSD_STREAM", modelDir.path, 1)
+            // Cap Metal command buffer size to avoid the 5s Apple GPU Watchdog.
+            // Each GatedDeltaNet kernel + attention + MLP = ~40 ops/layer max.
+            // With 3 linear-attention layers before each full-attention layer,
+            // we need a buffer budget of ~120-150 ops before the outer eval+sync
+            // in partitionedLayerCall fires. Set a conservative limit.
+            setenv("MLX_MAX_OPS_PER_BUFFER", "50", 1)
+            print("[mlx-server] Enabled Async SSD Streaming on directory: \(modelDir.lastPathComponent)")
+        }
+        
         var partitionPlan: PartitionPlan?
         if let modelDir = modelDirectory,
            let profile = ModelProfiler.profile(modelDirectory: modelDir, modelId: modelId) {
@@ -242,12 +254,24 @@ struct MLXServer: AsyncParsableCommand {
             case .fullGPU:
                 print("[mlx-server] \(plan.strategy.emoji) Memory strategy: FULL GPU (\(String(format: "%.1f", plan.weightMemoryGB))GB model, \(String(format: "%.1f", system.availableRAMGB))GB available)")
             case .swapAssisted:
-                Memory.cacheLimit = plan.recommendedCacheLimit
-                print("[mlx-server] \(plan.strategy.emoji) Memory strategy: SWAP-ASSISTED (\(String(format: "%.1f", plan.overcommitRatio))× overcommit, cache limited to \(plan.recommendedCacheLimit / (1024*1024))MB)")
+                if self.streamExperts {
+                    Memory.cacheLimit = system.recommendedWorkingSetBytes
+                    Memory.memoryLimit = 200 * 1024 * 1024 * 1024 // 200GB to bypass Apple MLX `eval_impl` spin loop
+                    print("[mlx-server] \(plan.strategy.emoji) Memory strategy: SWAP-ASSISTED (\(String(format: "%.1f", plan.overcommitRatio))× overcommit). Cache penalty bypassed for SSD Streaming.")
+                } else {
+                    Memory.cacheLimit = plan.recommendedCacheLimit
+                    print("[mlx-server] \(plan.strategy.emoji) Memory strategy: SWAP-ASSISTED (\(String(format: "%.1f", plan.overcommitRatio))× overcommit, cache limited to \(plan.recommendedCacheLimit / (1024*1024))MB)")
+                }
                 for w in plan.warnings { print("[mlx-server]    \(w)") }
             case .layerPartitioned:
-                Memory.cacheLimit = plan.recommendedCacheLimit
-                print("[mlx-server] \(plan.strategy.emoji) Memory strategy: LAYER PARTITIONED (\(plan.recommendedGPULayers)/\(plan.totalLayers) GPU layers)")
+                if self.streamExperts {
+                    Memory.cacheLimit = system.recommendedWorkingSetBytes
+                    Memory.memoryLimit = 200 * 1024 * 1024 * 1024 // 200GB to bypass Apple MLX `eval_impl` spin loop
+                    print("[mlx-server] \(plan.strategy.emoji) Memory strategy: LAYER PARTITIONED (\(plan.recommendedGPULayers)/\(plan.totalLayers) GPU layers). Cache penalty bypassed for SSD Streaming.")
+                } else {
+                    Memory.cacheLimit = plan.recommendedCacheLimit
+                    print("[mlx-server] \(plan.strategy.emoji) Memory strategy: LAYER PARTITIONED (\(plan.recommendedGPULayers)/\(plan.totalLayers) GPU layers, cache limited to \(plan.recommendedCacheLimit / (1024*1024))MB)")
+                }
                 for w in plan.warnings { print("[mlx-server]    \(w)") }
             case .tooLarge:
                 Memory.cacheLimit = plan.recommendedCacheLimit
@@ -276,9 +300,15 @@ struct MLXServer: AsyncParsableCommand {
         } else if let plan = partitionPlan,
                   (plan.strategy == .layerPartitioned || plan.strategy == .swapAssisted),
                   plan.overcommitRatio > 1.0 {
-            // Auto-partition when model exceeds available RAM (no flag needed)
-            requestedGPULayers = plan.recommendedGPULayers
-            print("[mlx-server] Auto-partitioning: \(plan.recommendedGPULayers)/\(plan.totalLayers) layers on GPU")
+            if self.streamExperts {
+                print("[mlx-server] SSD Streaming active: Bypassing CPU auto-partitioning (forcing all layers to GPU)")
+                partitionPlan?.gpuLayers = plan.totalLayers
+                // Keep requestedGPULayers = nil (all GPU)
+            } else {
+                // Auto-partition when model exceeds available RAM (no flag needed)
+                requestedGPULayers = plan.recommendedGPULayers
+                print("[mlx-server] Auto-partitioning: \(plan.recommendedGPULayers)/\(plan.totalLayers) layers on GPU")
+            }
         }
 
         let isVision = self.vision
@@ -331,7 +361,7 @@ struct MLXServer: AsyncParsableCommand {
         }
 
         // ── Auto-calibration (Wisdom system) ──
-        if let plan = partitionPlan {
+        if let plan = partitionPlan, !self.streamExperts {
             if self.calibrate {
                 // Force re-calibration
                 if let wisdom = try? await Calibrator.calibrate(
@@ -347,6 +377,8 @@ struct MLXServer: AsyncParsableCommand {
                 }
                 print("[mlx-server] 📊 Loaded wisdom: \(String(format: "%.1f", wisdom.tokPerSec)) tok/s, cache=\(wisdom.cacheLimit / (1024*1024))MB (calibrated \(wisdom.calibratedAt.formatted(.relative(presentation: .named))))")
             }
+        } else if self.streamExperts {
+            print("[mlx-server] 🧠 Auto-calibration (Wisdom) bypassed for SSD Streaming")
         }
 
         print("[mlx-server] Model loaded. Starting HTTP server on \(host):\(port)")

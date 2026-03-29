@@ -259,6 +259,53 @@ public enum MLXFast {
         return MLXArray(result)
     }
 
+    public static func turboQuantEncode(
+        keys: MLXArray, values: MLXArray, bits: Int = 3, stream: StreamOrDevice = .default
+    ) -> ((MLXArray, MLXArray), (MLXArray, MLXArray)) {
+        var resPolarK = mlx_array_new()
+        var resPolarV = mlx_array_new()
+        var resResidualK = mlx_array_new()
+        var resResidualV = mlx_array_new()
+
+        mlx_fast_turbo_encode(
+            &resPolarK, &resPolarV, &resResidualK, &resResidualV,
+            keys.ctx, values.ctx, Int32(bits),
+            stream.ctx
+        )
+        
+        let kTuple = (MLXArray(resPolarK), MLXArray(resResidualK))
+        let vTuple = (MLXArray(resPolarV), MLXArray(resResidualV))
+        return (kTuple, vTuple)
+    }
+
+    public static func streamedGatherMM(
+        x: MLXArray, wShape: MLXArray, activeExpert: UInt32, safetensorsPath: String, tensorName: String, stream: StreamOrDevice = .default
+    ) -> MLXArray {
+        var result = mlx_array_new()
+        
+        safetensorsPath.withCString { pathPtr in
+            tensorName.withCString { namePtr in
+                mlx_fast_streamed_gather_mm(
+                    &result,
+                    x.ctx,
+                    wShape.ctx,
+                    activeExpert,
+                    pathPtr,
+                    namePtr,
+                    stream.ctx
+                )
+            }
+        }
+
+        return MLXArray(result)
+    }
+
+    /// Explicitly page-faults the underlying memory buffer on the CPU thread.
+    /// Used during heavy SSD swap evaluation to bypass GPU Watchdog timeouts.
+    public static func prefault(_ x: MLXArray) {
+        mlx_fast_prefault(x.ctx)
+    }
+
 }
 
 /// Optimized implementation of `NN.RoPE`.
@@ -367,3 +414,6 @@ public func layerNorm(
 ) -> MLXArray {
     return MLXFast.layerNorm(x, weight: weight, bias: bias, eps: eps, stream: stream)
 }
+
+
+

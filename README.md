@@ -49,7 +49,10 @@ To reliably run massive 122B parameter MoE models over SSD streaming, `mlx-serve
 
 ## 🛠️ Quick Start
 
-### Build
+### Fastest: Download Pre-built Binary
+The absolute fastest way to get started is to [download the latest pre-compiled macOS binary](https://github.com/SharpAI/mlx-server/releases) directly from the Releases page. Just extract it and run!
+
+### Build from Source
 
 ```bash
 swift build -c release
@@ -92,9 +95,34 @@ curl http://localhost:5413/v1/chat/completions \
     ]
   }'
 ```
-
 ---
 
+## 🛡️ Aegis-AI & System Integration
+
+`mlx-server` is designed to be a completely transparent, drop-in substitution for `llama-server` or cloud VLM gateways within local intelligence platforms like **Aegis-AI**, offering dramatically faster zero-latency inference on macOS instances.
+
+When configuring local inference workflows (e.g., within `~/.aegis-ai/llm-config.json`), apply the following integration details:
+
+### 1. Gateway Emulation
+`mlx-server` exposes a fully standard OpenAI-compatible API layer:
+- **`GET /health`**: Exposes advanced JSON containing GPU metrics and VRAM allocations.
+- **`GET /v1/models`**: Lists actively loaded topologies.
+- **`POST /v1/chat/completions`**: Supports both `stream: true` and `stream: false`. Natively handles tool-calls, system prompts, and temperature variables.
+
+### 2. Process Configuration (The Sidecar)
+When your agent engine spins up `mlx-server` using standard subprocess management, you must be explicitly aware of the memory requirements for *Mixture of Expert* (MoE) models.
+
+> [!CAUTION]
+> **Critical Memory Routing (`--stream-experts`)**  
+> When managing MoE models (e.g., `Qwen3.5-122B-A10B` where active parameters are significantly smaller than the total payload), you **must artificially append** the `--stream-experts true` flag to the process arguments. If omitted, macOS will inevitably suffer a `Data Abort` memory-mapping fault when mapping > 100GB of tensors onto the unified GPU hardware.
+
+### 3. Client Reliability Overrides (First-Request Lock)
+> [!WARNING]
+> Because zero-copy heavy matrices (like 122B parameter graphs) require **3-5+ minutes of pure compile-time lockup** on their *very first request* to build the specialized Apple Metal compilation graphs, **standard short-timeouts (e.g., 60s) will fail the first request.**  
+> 
+> Ensure your system's `node-fetch` metrics checks, network controllers, or `curl` abort signals extend standard timeouts to `> 300s`.
+
+---
 ## ⚙️ CLI Options
 
 | Option | Default | Description |
@@ -109,7 +137,7 @@ curl http://localhost:5413/v1/chat/completions \
 ## 📦 Requirements
 
 - macOS 14.0+
-- Apple Silicon (M1/M2/M3/M4)
+- Apple Silicon (M1/M2/M3/M4/M5)
 - Xcode Command Line Tools
 - Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
 

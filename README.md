@@ -15,6 +15,34 @@ No Python runtime, no Global Interpreter Lock (GIL), no unnecessary memory copie
 
 ---
 
+## ⚡️ TurboQuantization: KV Cache Compression
+
+`mlx-server` implements **TurboQuant** (AISTATS/ICLR 2026) for on-the-fly KV cache compression, enabling long-context inference with drastically reduced memory. At 3 bits/coordinate, the KV cache is compressed ~5.8× vs FP16 with near-zero accuracy loss.
+
+The algorithm runs in two stages per KV vector:
+
+**Stage 1 — PolarQuant (2 bits):**
+1. Extract L2 norm: `‖x‖`
+2. Normalize: `x̂ = x / ‖x‖`
+3. Rotate: `y = R @ x̂`  (random orthogonal R via Fast Walsh-Hadamard Transform — O(d log d))
+4. Quantize each coordinate to nearest Lloyd-Max centroid (optimal for post-rotation Gaussian distribution)
+- → Store: `(2-bit indices[d], float16 norm)`
+
+**Stage 2 — QJL residual (1 bit):**
+1. Dequantize Stage 1 → `x̂_mse`
+2. Compute residual: `r = x - x̂_mse`
+3. Project: `z = S @ r`  (S ~ N(0,1) random matrix)
+4. Sign-bit encode: `signs = sign(z) ∈ {+1, -1}`
+- → Store: `(1-bit signs[d], float16 residual_norm)`
+
+**Total: 3 bits/coord + 32-bit norm ≈ 5.8× compression vs FP16**
+
+> *K cache uses full TurboQuant (Stage 1 + Stage 2) to preserve attention dot-product accuracy. V cache uses Stage 1 only (PolarQuant MSE) since MSE-optimal reconstruction doesn't need the QJL residual stage.*
+
+Reference implementation: [`turboquant_plus`](https://github.com/TheTom/turboquant_plus) (Python) | Paper: [TurboQuant, AISTATS 2026](https://aistats.org)
+
+---
+
 ## 🆚 Why `mlx-server`? (vs. llama.cpp & python mlx-lm)
 
 | Feature | `mlx-server` (Swift) | `llama.cpp` (Metal) | `python mlx-lm` |

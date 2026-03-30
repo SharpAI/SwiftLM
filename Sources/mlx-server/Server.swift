@@ -451,15 +451,20 @@ struct MLXServer: AsyncParsableCommand {
             // Build partition info string
             var partitionJson = ""
             if let plan = partitionPlan {
-                let pData: [String: Any] = [
-                    "strategy": plan.strategy.rawValue,
+                let isSSD = streamExperts
+                var pData: [String: Any] = [
+                    "strategy": isSSD ? "ssd_streaming" : plan.strategy.rawValue,
                     "overcommit_ratio": round(plan.overcommitRatio * 100) / 100,
                     "model_weight_gb": round(plan.weightMemoryGB * 10) / 10,
                     "kv_cache_gb": round(plan.kvCacheMemoryGB * 10) / 10,
                     "total_required_gb": round(plan.totalRequiredGB * 10) / 10,
-                    "gpu_layers": plan.recommendedGPULayers,
+                    "gpu_layers": isSSD ? plan.totalLayers : plan.gpuLayers,
+                    "cpu_layers": isSSD ? 0 : (plan.totalLayers - plan.gpuLayers),
                     "total_layers": plan.totalLayers,
-                    "estimated_tok_s": round(plan.estimatedTokensPerSec * 10) / 10,
+                    "estimated_tok_s": isSSD
+                        ? round(max(plan.estimatedTokensPerSec, plan.estimatedTokensPerSec * plan.overcommitRatio) * 10) / 10
+                        : round(plan.estimatedTokensPerSec * 10) / 10,
+                    "ssd_stream": isSSD
                 ]
                 if let pJson = try? JSONSerialization.data(withJSONObject: pData),
                    let pStr = String(data: pJson, encoding: .utf8) {
@@ -586,8 +591,21 @@ struct MLXServer: AsyncParsableCommand {
             "engine": "mlx",
             "vision": isVision
         ]
-        if let plan = partitionPlan {
-            readyEvent["partition"] = plan.healthInfo
+        if var plan = partitionPlan {
+            var info = plan.healthInfo
+            if self.streamExperts {
+                // SSD streaming bypasses swap — report accurate strategy and suppress swap estimate
+                info["strategy"] = "ssd_streaming"
+                info["ssd_stream"] = true
+                // Measured 3.81 tok/s on 122B MoE; use a reasonable SSD-streaming estimate
+                // (swap estimate is artificially divided by overcommit — not applicable here)
+                let ssdEstimate = max(plan.estimatedTokensPerSec, plan.estimatedTokensPerSec * plan.overcommitRatio)
+                info["estimated_tok_s"] = round(ssdEstimate * 10) / 10
+                // All layers on GPU when SSD streaming is active
+                info["gpu_layers"] = plan.totalLayers
+                info["cpu_layers"] = 0
+            }
+            readyEvent["partition"] = info
         }
         if let data = try? JSONSerialization.data(withJSONObject: readyEvent),
            let json = String(data: data, encoding: .utf8) {

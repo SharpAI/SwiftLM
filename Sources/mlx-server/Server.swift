@@ -424,7 +424,9 @@ struct MLXServer: AsyncParsableCommand {
         let corsStr = corsOrigin ?? "disabled"
         let memLimitStr = self.memLimit.map { "\($0)MB" } ?? "system_default"
         let authStr = apiKeyValue != nil ? "enabled" : "disabled"
-        print("[mlx-server] Config: ctx_size=\(ctxSizeStr), temp=\(config.temp), top_p=\(config.topP), repeat_penalty=\(penaltyStr), parallel=\(parallelSlots), cors=\(corsStr), mem_limit=\(memLimitStr), auth=\(authStr)")
+        let thinkingStr = config.thinking ? "enabled" : "disabled"
+        let ssdStr = self.streamExperts ? "enabled" : "disabled"
+        print("[mlx-server] Config: ctx_size=\(ctxSizeStr), temp=\(config.temp), top_p=\(config.topP), repeat_penalty=\(penaltyStr), parallel=\(parallelSlots), cors=\(corsStr), mem_limit=\(memLimitStr), auth=\(authStr), thinking=\(thinkingStr), ssd_stream=\(ssdStr)")
 
         // ── Build Hummingbird router ──
         let router = Router()

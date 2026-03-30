@@ -871,8 +871,15 @@ func handleChatCompletion(
     await stats.requestStarted()
     let genStart = Date()
 
-    // Pass enable_thinking to the Jinja chat template via additionalContext
-    let templateContext: [String: any Sendable]? = config.thinking ? nil : ["enable_thinking": false]
+    // Pass enable_thinking to the Jinja chat template via additionalContext.
+    // Precedence: per-request chat_template_kwargs > server --thinking flag
+    let enableThinking: Bool
+    if let kwargs = chatReq.chatTemplateKwargs, let perRequest = kwargs["enable_thinking"] {
+        enableThinking = perRequest  // per-request override wins
+    } else {
+        enableThinking = config.thinking  // fall back to server --thinking flag
+    }
+    let templateContext: [String: any Sendable]? = enableThinking ? nil : ["enable_thinking": false]
     let userInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: templateContext)
     let lmInput = try await container.prepare(input: userInput)
 
@@ -1660,6 +1667,8 @@ struct ChatCompletionRequest: Decodable {
     let seed: Int?
     let streamOptions: StreamOptions?
     let responseFormat: ResponseFormat?
+    /// Per-request Jinja template kwargs (e.g. {"enable_thinking": false} for Qwen3/Qwen3.5)
+    let chatTemplateKwargs: [String: Bool]?
 
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, tools, stop, seed
@@ -1671,6 +1680,7 @@ struct ChatCompletionRequest: Decodable {
         case presencePenalty = "presence_penalty"
         case streamOptions = "stream_options"
         case responseFormat = "response_format"
+        case chatTemplateKwargs = "chat_template_kwargs"
     }
 }
 

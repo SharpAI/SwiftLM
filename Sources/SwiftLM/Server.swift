@@ -897,9 +897,11 @@ func handleChatCompletion(
     let genStart = Date()
 
     // Pass enable_thinking to the Jinja chat template via additionalContext.
-    // Precedence: per-request chat_template_kwargs > server --thinking flag
+    // Precedence: top-level request > per-request chat_template_kwargs > server --thinking flag
     let enableThinking: Bool
-    if let kwargs = chatReq.chatTemplateKwargs, let perRequest = kwargs["enable_thinking"] {
+    if let explicitTopLevel = chatReq.enableThinking {
+        enableThinking = explicitTopLevel
+    } else if let kwargs = chatReq.chatTemplateKwargs, let perRequest = kwargs["enable_thinking"] {
         enableThinking = perRequest  // per-request override wins
     } else {
         enableThinking = config.thinking  // fall back to server --thinking flag
@@ -1913,6 +1915,8 @@ struct ChatCompletionRequest: Decodable {
     let responseFormat: ResponseFormat?
     /// Per-request Jinja template kwargs (e.g. {"enable_thinking": false} for Qwen3/Qwen3.5)
     let chatTemplateKwargs: [String: Bool]?
+    /// Top-level thinking override emitted by Aegis-AI gateway
+    let enableThinking: Bool?
 
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, tools, stop, seed
@@ -1925,6 +1929,7 @@ struct ChatCompletionRequest: Decodable {
         case streamOptions = "stream_options"
         case responseFormat = "response_format"
         case chatTemplateKwargs = "chat_template_kwargs"
+        case enableThinking = "enable_thinking"
     }
 }
 

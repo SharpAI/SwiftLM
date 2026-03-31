@@ -74,10 +74,12 @@ public final class InferenceEngine: ObservableObject {
     private var generationTask: Task<Void, Never>?
 
     // All NotificationCenter observers collected for clean deregistration
-    private var observers: [NSObjectProtocol] = []
+    // nonisolated(unsafe): populated exclusively from MainActor init, read only in deinit
+    // after all strong references have dropped — no concurrent access possible.
+    // Declared nonisolated(unsafe) to satisfy Swift 6 deinit isolation rules.
+    nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
 
-    // Track the model ID that was active before we backgrounded,
-    // so we can restore it when returning to foreground.
+    // Tracks the model ID active before app backgrounding so we can restore it on foreground.
     private var backgroundedModelId: String?
 
     public init() {
@@ -264,7 +266,7 @@ public final class InferenceEngine: ObservableObject {
         currentModelId = nil
         state = .idle
         ExpertStreamingConfig.shared.deactivate()
-        MLX.GPU.set(cacheLimit: 0)
+        MLX.Memory.cacheLimit = 0
     }
 
     // MARK: — Generation

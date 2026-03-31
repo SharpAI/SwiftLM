@@ -1,0 +1,165 @@
+// ModelCatalog.swift — Device-aware model recommendations for SwiftLM Chat
+import Foundation
+
+/// A curated model entry with memory requirements and metadata.
+public struct ModelEntry: Identifiable, Sendable {
+    public let id: String          // HuggingFace model ID
+    public let displayName: String
+    public let parameterSize: String  // e.g. "3B", "7B"
+    public let quantization: String   // e.g. "4-bit"
+    public let ramRequiredGB: Double  // Conservative RAM required
+    public let ramRecommendedGB: Double // Ideal RAM for good performance
+    public let isMoE: Bool
+    public let supportsVision: Bool
+    public var badge: String?        // e.g. "⚡ Fast", "🧠 Smart"
+
+    public init(
+        id: String,
+        displayName: String,
+        parameterSize: String,
+        quantization: String,
+        ramRequiredGB: Double,
+        ramRecommendedGB: Double,
+        isMoE: Bool = false,
+        supportsVision: Bool = false,
+        badge: String? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.parameterSize = parameterSize
+        self.quantization = quantization
+        self.ramRequiredGB = ramRequiredGB
+        self.ramRecommendedGB = ramRecommendedGB
+        self.isMoE = isMoE
+        self.supportsVision = supportsVision
+        self.badge = badge
+    }
+}
+
+/// Device memory profile used for model recommendation.
+public struct DeviceProfile: Sendable {
+    public let physicalRAMGB: Double
+    public let isAppleSilicon: Bool
+
+    public static var current: DeviceProfile {
+        let ram = Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)
+        return DeviceProfile(physicalRAMGB: ram, isAppleSilicon: true)
+    }
+}
+
+/// Curated catalog of MLX-compatible models with device-aware recommendations.
+public enum ModelCatalog {
+
+    /// All available models, ordered from smallest to largest.
+    public static let all: [ModelEntry] = [
+        ModelEntry(
+            id: "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+            displayName: "Qwen 2.5 0.5B",
+            parameterSize: "0.5B",
+            quantization: "4-bit",
+            ramRequiredGB: 0.5,
+            ramRecommendedGB: 1.0,
+            badge: "⚡ Tiny"
+        ),
+        ModelEntry(
+            id: "mlx-community/Phi-3.5-mini-instruct-4bit",
+            displayName: "Phi-3.5 Mini",
+            parameterSize: "3.8B",
+            quantization: "4-bit",
+            ramRequiredGB: 2.1,
+            ramRecommendedGB: 3.0,
+            badge: "⚡ Fast"
+        ),
+        ModelEntry(
+            id: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            displayName: "Llama 3.2 3B",
+            parameterSize: "3B",
+            quantization: "4-bit",
+            ramRequiredGB: 1.8,
+            ramRecommendedGB: 2.5,
+            badge: "🦙 Popular"
+        ),
+        ModelEntry(
+            id: "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            displayName: "Qwen 2.5 7B",
+            parameterSize: "7B",
+            quantization: "4-bit",
+            ramRequiredGB: 4.2,
+            ramRecommendedGB: 6.0,
+            badge: "🧠 Smart"
+        ),
+        ModelEntry(
+            id: "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
+            displayName: "Mistral 7B",
+            parameterSize: "7B",
+            quantization: "4-bit",
+            ramRequiredGB: 4.1,
+            ramRecommendedGB: 6.0
+        ),
+        ModelEntry(
+            id: "mlx-community/Qwen2.5-14B-Instruct-4bit",
+            displayName: "Qwen 2.5 14B",
+            parameterSize: "14B",
+            quantization: "4-bit",
+            ramRequiredGB: 8.5,
+            ramRecommendedGB: 12.0,
+            badge: "🧠 Powerful"
+        ),
+        ModelEntry(
+            id: "mlx-community/Qwen2.5-32B-Instruct-4bit",
+            displayName: "Qwen 2.5 32B",
+            parameterSize: "32B",
+            quantization: "4-bit",
+            ramRequiredGB: 19.0,
+            ramRecommendedGB: 24.0,
+            badge: "🔬 Expert"
+        ),
+        ModelEntry(
+            id: "mlx-community/Qwen3.5-122B-A10B-4bit",
+            displayName: "Qwen 3.5 122B (MoE)",
+            parameterSize: "122B",
+            quantization: "4-bit",
+            ramRequiredGB: 20.0,
+            ramRecommendedGB: 48.0,
+            isMoE: true,
+            badge: "💎 Flagship"
+        ),
+    ]
+
+    /// Returns models that will fit on the given device profile.
+    /// - Parameter device: The device to filter for
+    /// - Parameter safetyMargin: Fraction of RAM to keep free for OS (default 25%)
+    public static func recommended(
+        for device: DeviceProfile = .current,
+        safetyMargin: Double = 0.25
+    ) -> [ModelEntry] {
+        let usableRAM = device.physicalRAMGB * (1.0 - safetyMargin)
+        return all.filter { $0.ramRequiredGB <= usableRAM }
+    }
+
+    /// Returns the single best default model for the device.
+    public static func defaultModel(for device: DeviceProfile = .current) -> ModelEntry {
+        let candidates = recommended(for: device)
+        // Pick the largest model that fits comfortably
+        return candidates.last ?? all.first!
+    }
+
+    /// Memory fit status for a model on a given device.
+    public enum FitStatus {
+        case fits          // Comfortably fits in RAM
+        case tight         // Fits but will be slow (>80% RAM)
+        case requiresFlash // Requires flash streaming (MoE > RAM)
+        case tooLarge      // Exceeds device capability
+    }
+
+    public static func fitStatus(
+        for model: ModelEntry,
+        on device: DeviceProfile = .current
+    ) -> FitStatus {
+        let ram = device.physicalRAMGB
+        if model.ramRequiredGB <= ram * 0.75 { return .fits }
+        if model.ramRequiredGB <= ram * 0.90 { return .tight }
+        if model.isMoE && model.ramRequiredGB <= ram * 4.0 { return .requiresFlash }
+        return .tooLarge
+    }
+}

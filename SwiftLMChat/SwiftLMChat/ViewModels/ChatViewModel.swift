@@ -1,0 +1,88 @@
+// ChatViewModel.swift — Bridges InferenceEngine actor to SwiftUI
+import SwiftUI
+import Combine
+
+@MainActor
+final class ChatViewModel: ObservableObject {
+    @Published var messages: [ChatMessage] = []
+    @Published var streamingText: String = ""
+    @Published var thinkingText: String? = nil
+    @Published var isGenerating: Bool = false
+    @Published var config: GenerationConfig = .default
+    @Published var systemPrompt: String = ""
+
+    weak var engine: InferenceEngine?
+    private var generationTask: Task<Void, Never>?
+
+    // MARK: — Send
+
+    func send(_ userText: String) async {
+        guard let engine, !isGenerating else { return }
+
+        let userMessage = ChatMessage.user(userText)
+        messages.append(userMessage)
+
+        isGenerating = true
+        streamingText = ""
+        thinkingText = nil
+
+        var fullMessages = messages
+        if !systemPrompt.isEmpty {
+            fullMessages.insert(.system(systemPrompt), at: 0)
+        }
+
+        generationTask = Task {
+            var response = ""
+            var thinking = ""
+            var inThinkBlock = false
+
+            for await token in engine.generate(messages: fullMessages, config: config) {
+                guard !Task.isCancelled else { break }
+
+                if token.isThinking {
+                    thinking += token.text
+                    thinkingText = thinking
+                } else {
+                    // Strip any residual </think> tag from visible output
+                    var visible = token.text
+                    if visible.contains("</think>") {
+                        visible = visible.replacingOccurrences(of: "</think>", with: "")
+                        inThinkBlock = false
+                    }
+                    if !inThinkBlock {
+                        response += visible
+                        streamingText = response
+                    }
+                }
+            }
+
+            // Commit completed message
+            if !response.isEmpty {
+                messages.append(.assistant(response))
+            }
+
+            streamingText = ""
+            thinkingText = nil
+            isGenerating = false
+        }
+
+        await generationTask?.value
+    }
+
+    // MARK: — Controls
+
+    func stopGeneration() {
+        generationTask?.cancel()
+        if !streamingText.isEmpty {
+            messages.append(.assistant(streamingText))
+        }
+        streamingText = ""
+        thinkingText = nil
+        isGenerating = false
+    }
+
+    func newConversation() {
+        stopGeneration()
+        messages = []
+    }
+}

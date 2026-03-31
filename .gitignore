@@ -13,3 +13,10 @@ DerivedData/
 # IDE
 .vscode/
 .idea/
+
+# Temporary Artifacts & Logs
+*.log
+*.metallib
+*.pid
+curl_out.txt
+sample.txt

@@ -2,14 +2,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "mlx-server",
-    platforms: [.macOS(.v14)],
+    name: "SwiftLM",
+    platforms: [.macOS(.v14), .iOS(.v17)],
     dependencies: [
-        // Apple MLX Swift — core inference engine (Apple-maintained, tagged releases)
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
-        // Apple's LLM library built on MLX Swift (SharpAI fork)
-        // Pinned to main branch for Qwen3.5 support (PRs #97, #120, #129, #133, #135 — not yet in a release tag)
-        .package(url: "https://github.com/SharpAI/mlx-swift-lm", branch: "main"),
+        // Local Apple MLX Swift fork for C++ extensions
+        .package(path: "./LocalPackages/mlx-swift"),
+        // Apple's LLM library built on MLX Swift (SharpAI fork — with GPU/CPU layer partitioning)
+        .package(path: "./mlx-swift-lm"),
         // HuggingFace tokenizers + model download
         .package(url: "https://github.com/huggingface/swift-transformers", .upToNextMinor(from: "1.2.0")),
         // Lightweight HTTP server (Apple-backed Swift server project)
@@ -18,17 +17,32 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
     ],
     targets: [
+        // ── CLI HTTP server (macOS only) ──────────────────────────────
         .executableTarget(
-            name: "mlx-server",
+            name: "SwiftLM",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXVLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "Transformers", package: "swift-transformers"),
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
-            path: "Sources/mlx-server",
+            path: "Sources/SwiftLM",
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
+            ]
+        ),
+        // ── Shared inference library for SwiftLM Chat (iOS + macOS) ──
+        .target(
+            name: "MLXInferenceCore",
+            dependencies: [
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+            ],
+            path: "Sources/MLXInferenceCore",
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency")
             ]

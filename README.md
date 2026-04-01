@@ -74,6 +74,12 @@ A native iPhone & iPad companion app that downloads MLX models directly from Hug
 - **Context-aware empty states** — downloading ring, loading spinner, idle prompt
 - **iOS lifecycle hardened** — model unload only fires on true background (not notification banners); 30-second grace period on app-switch
 
+> 📱 **Running live on iPhone 13 Pro (6 GB)** — no Python, no server, no GIL. Pure on-device MLX inference via Metal GPU.
+
+<p align="center">
+  <img src="docs/ios_demo.gif" width="300" alt="SwiftLM Chat running on iPhone 13 Pro 6GB" />
+</p>
+
 ### Build & Run (iOS)
 
 ```bash

@@ -111,12 +111,19 @@ tar -xzf SwiftLM-<version>-macos-arm64.tar.gz
 ### Build from Source
 
 ```bash
+# Must clone recursively — default.metallib ships inside the mlx-swift submodule
+git clone --recursive https://github.com/SharpAI/SwiftLM
+cd SwiftLM
 swift build -c release
 ```
 
-When building from source the Metal shader library is compiled automatically by the Swift build system and placed next to the binary in `.build/release/`. Run from that directory:
+`default.metallib` is a pre-built artifact inside the `mlx-swift` submodule at:
+`LocalPackages/mlx-swift/Source/Cmlx/mlx/mlx/backend/metal/kernels/default.metallib`
+
+Copy it next to the binary before running:
 
 ```bash
+cp LocalPackages/mlx-swift/Source/Cmlx/mlx/mlx/backend/metal/kernels/default.metallib .build/release/
 .build/release/SwiftLM \
   --model mlx-community/Qwen3.5-122B-A10B-4bit \
   --stream-experts \

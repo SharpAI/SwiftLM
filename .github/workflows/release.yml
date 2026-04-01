@@ -71,12 +71,15 @@ jobs:
 
       - name: Find and copy default.metallib
         run: |
-          # The Metal shader library is compiled as part of mlx-swift during
-          # `swift build`. Find it in the build artifacts and copy it to the
-          # repo root so the package step can pick it up.
-          METALLIB=$(find .build -name "default.metallib" | head -1)
+          # default.metallib is a pre-built artifact shipped inside the
+          # mlx-swift submodule — it is NOT produced by `swift build`.
+          # Search the submodule tree for it (fallback to anywhere in repo).
+          METALLIB=$(find LocalPackages -name "default.metallib" | head -1)
           if [ -z "$METALLIB" ]; then
-            echo "ERROR: default.metallib not found in build artifacts!"
+            METALLIB=$(find . -name "default.metallib" -not -path "./.git/*" | head -1)
+          fi
+          if [ -z "$METALLIB" ]; then
+            echo "ERROR: default.metallib not found — is mlx-swift submodule checked out?"
             exit 1
           fi
           echo "Found metallib: $METALLIB"

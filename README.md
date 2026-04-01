@@ -4,6 +4,10 @@ A blazingly fast, native Swift inference server that serves [MLX](https://github
 
 No Python runtime, no Global Interpreter Lock (GIL), no unnecessary memory copies. Just bare-metal Apple Silicon performance compiled to a single binary.
 
+<p align="center">
+  <img src="docs/demo.gif" width="320" alt="SwiftLM Chat iOS demo" />
+</p>
+
 ## 🚀 Features
 
 - 🍎 **100% Native Apple Silicon**: Powered natively by Metal and Swift. 
@@ -56,7 +60,39 @@ To reliably run massive 122B parameter MoE models over SSD streaming, `SwiftLM` 
 
 ---
 
-## 🛠️ Quick Start
+---
+
+## 📱 SwiftLM Chat — iOS App
+
+A native iPhone & iPad companion app that downloads MLX models directly from HuggingFace and runs inference on-device via MLX Swift.
+
+### Features
+- **Tab UI**: Chat · Models · Settings
+- **Live download progress** with speed indicator and circular progress ring
+- **Model catalog**: Qwen3, Phi-3.5, Mistral, Llama — with on-device RAM fit indicators
+- **HuggingFace search** — find any `mlx-community` model by name
+- **Context-aware empty states** — downloading ring, loading spinner, idle prompt
+- **iOS lifecycle hardened** — model unload only fires on true background (not notification banners); 30-second grace period on app-switch
+
+### Build & Run (iOS)
+
+```bash
+cd SwiftLMChat
+python3 generate_xcodeproj.py       # Generates SwiftLMChat.xcodeproj
+open SwiftLMChat.xcodeproj
+```
+
+Then in Xcode:
+1. Select the **SwiftLMChat** target → **Signing & Capabilities**
+2. Set your **Team** (your Apple Developer account)
+3. Select your iPhone as the run destination
+4. ⌘R to build and run
+
+> **Note for contributors**: The `.xcodeproj` is git-ignored (it contains your personal Team ID). Run `generate_xcodeproj.py` after cloning to regenerate it locally. Your Team ID is never committed.
+
+---
+
+## 🛠️ Quick Start (macOS Server)
 
 ### Fastest: Download Pre-built Binary
 The absolute fastest way to get started is to [download the latest pre-compiled macOS binary](https://github.com/SharpAI/SwiftLM/releases) directly from the Releases page. Just extract it and run!

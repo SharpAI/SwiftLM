@@ -229,11 +229,15 @@ struct MLXServer: AsyncParsableCommand {
         
         if self.streamExperts, let modelDir = modelDirectory {
             setenv("EXPERIMENTAL_SSD_STREAM", modelDir.path, 1)
+            // Activate the modern Swift ExpertStreamingConfig so Load.swift can:
+            //  1. Initialize ExpertStreamerManager (shard index for getFile())
+            //  2. Assign tensorName on every QuantizedSwitchLinear after quantize()
+            // Without this, the streamedGatherMM direct-NVMe path never fires.
+            ExpertStreamingConfig.shared.activate(
+                modelDirectory: modelDir,
+                useDirectIO: true  // macOS: 5 GB/s pread() via moe_stream_op.cpp
+            )
             // Cap Metal command buffer size to avoid the 5s Apple GPU Watchdog.
-            // Each GatedDeltaNet kernel + attention + MLP = ~40 ops/layer max.
-            // With 3 linear-attention layers before each full-attention layer,
-            // we need a buffer budget of ~120-150 ops before the outer eval+sync
-            // in partitionedLayerCall fires. Set a conservative limit.
             setenv("MLX_MAX_OPS_PER_BUFFER", "50", 1)
             print("[SwiftLM] Enabled Async SSD Streaming on directory: \(modelDir.lastPathComponent)")
         }

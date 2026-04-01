@@ -87,10 +87,15 @@ def pbxproj():
 
     # PBXFileReference entries
     file_refs = ""
-    for path, fref, _ in all_sources:
+    for path, fref, _ in app_sources:
         name = Path(path).name
+        # SOURCE_ROOT = project root (SwiftLMChat/) so the path is exact, no doubling
+        file_refs += f'\t\t{fref} /* {name} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "{name}"; path = "{path}"; sourceTree = "SOURCE_ROOT"; }};\n'
+    for path, fref, _ in core_sources:
+        name = Path(path).name
+        # <group> is fine here — these paths start with ../Sources which go up from project dir
         file_refs += f'\t\t{fref} /* {name} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "{name}"; path = "{path}"; sourceTree = "<group>"; }};\n'
-    file_refs += f'\t\t{ASSETS_REF} /* Assets.xcassets */ = {{isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = SwiftLMChat/Assets.xcassets; sourceTree = "<group>"; }};\n'
+    file_refs += f'\t\t{ASSETS_REF} /* Assets.xcassets */ = {{isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = SwiftLMChat/Assets.xcassets; sourceTree = "SOURCE_ROOT"; }};\n'
     file_refs += f'\t\t{APP_PRODUCT} /* SwiftLMChat.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SwiftLMChat.app; sourceTree = BUILT_PRODUCTS_DIR; }};\n'
 
     # Group children

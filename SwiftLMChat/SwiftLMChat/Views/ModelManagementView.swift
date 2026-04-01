@@ -77,7 +77,7 @@ struct ModelManagementView: View {
             // Cache info
             Section {
                 LabeledContent("Cache Location") {
-                    Text(ModelDownloadManager.huggingFaceCacheRoot.path)
+                   Text(ModelStorage.cacheRoot.path)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -89,7 +89,7 @@ struct ModelManagementView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .listStyle(.insetGrouped)
+        .listStyle(.inset)
     }
 
     // MARK: — Storage Card

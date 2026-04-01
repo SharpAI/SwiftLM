@@ -29,7 +29,7 @@ struct MessageBubble: View {
                     .textSelection(.enabled)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(isUser ? Color.accentColor : Color(.systemGray5))
+                    .background(isUser ? Color.accentColor : Color(white: 0.92))
                     .foregroundStyle(isUser ? .white : .primary)
                     .clipShape(BubbleShape(isUser: isUser))
 
@@ -69,7 +69,7 @@ struct StreamingBubble: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(8)
-                            .background(Color(.systemGray6))
+                            .background(Color(white: 0.95))
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     } label: {
                         Label("Thinking…", systemImage: "brain")
@@ -92,14 +92,14 @@ struct StreamingBubble: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(Color(.systemGray5))
+                    .background(Color(white: 0.92))
                     .clipShape(BubbleShape(isUser: false))
                 } else {
                     // Typing dots when no text yet
                     TypingIndicator()
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(Color(.systemGray5))
+                        .background(Color(white: 0.92))
                         .clipShape(BubbleShape(isUser: false))
                 }
             }

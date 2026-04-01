@@ -86,7 +86,7 @@ struct ModelPickerView: View {
                     }
                 }
             }
-            .listStyle(.insetGrouped)
+            .listStyle(.inset)
             .navigationTitle("Models")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -177,7 +177,7 @@ struct ModelPickerView: View {
         // Don't download if offline and not already cached
         if downloadManager.isOffline && !downloadManager.isDownloaded(modelId) { return }
         // Warn before large cellular downloads
-        if downloadManager.shouldWarnForCellular(modelId) && !downloadManager.isDownloaded(modelId) {
+        if downloadManager.shouldWarnForCellular(modelId: modelId) && !downloadManager.isDownloaded(modelId) {
             pendingCellularModelId = modelId
         } else {
             onSelect(modelId)

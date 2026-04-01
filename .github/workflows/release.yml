@@ -69,22 +69,32 @@ jobs:
           file .build/release/SwiftLM
           .build/release/SwiftLM --help || true
 
-      - name: Find and copy default.metallib
+      - name: Compile default.metallib from source
         run: |
-          # default.metallib is a pre-built artifact shipped inside the
-          # mlx-swift submodule — it is NOT produced by `swift build`.
-          # Search the submodule tree for it (fallback to anywhere in repo).
-          METALLIB=$(find LocalPackages -name "default.metallib" | head -1)
-          if [ -z "$METALLIB" ]; then
-            METALLIB=$(find . -name "default.metallib" -not -path "./.git/*" | head -1)
-          fi
-          if [ -z "$METALLIB" ]; then
-            echo "ERROR: default.metallib not found — is mlx-swift submodule checked out?"
-            exit 1
-          fi
-          echo "Found metallib: $METALLIB"
-          cp "$METALLIB" default.metallib
+          # The .metal shader sources are committed to git but the binary
+          # output (default.metallib) is gitignored. Compile fresh from the
+          # tracked sources so the metallib is version-matched to the Swift
+          # binary by construction.
+          KERNELS="LocalPackages/mlx-swift/Source/Cmlx/mlx/mlx/backend/metal/kernels"
+          MLX_ROOT="LocalPackages/mlx-swift/Source/Cmlx/mlx"
+
+          echo "Compiling $(find "$KERNELS" -name '*.metal' | wc -l | tr -d ' ') Metal shaders..."
+          mkdir -p /tmp/mlx_air
+
+          find "$KERNELS" -name "*.metal" | while read -r f; do
+            name=$(basename "$f" .metal)
+            xcrun -sdk macosx metal \
+              -I "$KERNELS" \
+              -I "$MLX_ROOT" \
+              -c "$f" \
+              -o "/tmp/mlx_air/${name}.air" 2>&1 || echo "WARN: failed to compile $f"
+          done
+
+          AIR_COUNT=$(ls /tmp/mlx_air/*.air 2>/dev/null | wc -l | tr -d ' ')
+          echo "Linking $AIR_COUNT .air files into default.metallib..."
+          xcrun -sdk macosx metallib /tmp/mlx_air/*.air -o default.metallib
           file default.metallib
+          ls -lh default.metallib
 
       - name: Package binary
         run: |

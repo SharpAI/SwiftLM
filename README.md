@@ -5,7 +5,7 @@ A blazingly fast, native Swift inference server that serves [MLX](https://github
 No Python runtime, no Global Interpreter Lock (GIL), no unnecessary memory copies. Just bare-metal Apple Silicon performance compiled to a single binary.
 
 <p align="center">
-  <img src="docs/mac_demo.gif" width="720" alt="SwiftLM Mac macOS demo" />
+  <a href="https://youtu.be/E9vR5FREhMg"><img src="docs/mac_demo.gif" width="720" alt="SwiftLM Mac macOS demo" /></a>
 </p>
 <br>
 <p align="center">

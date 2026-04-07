@@ -85,6 +85,7 @@ options=(
     "Qwen3.5-7B-Instruct-4bit"
     "Qwen3.5-14B-Instruct-4bit"
     "phi-4-mlx-4bit"
+    "GLM-5.1-4bit"
     "Custom (Enter your own Hub ID)"
     "Quit"
 )
@@ -200,6 +201,13 @@ if [ "$suite_opt" == "3" ]; then
         popd > /dev/null
     fi
     
+    if [ ! -d "$BENCHMARK_DIR/node_modules" ]; then
+        echo "Installing npm dependencies for HomeSec benchmark..."
+        pushd "$BENCHMARK_DIR" > /dev/null
+        npm install --silent
+        popd > /dev/null
+    fi
+    
     # Run the benchmark against the LLM gateway. Not specifying --vlm disables VLM tests.
     node "$BENCHMARK_DIR/scripts/run-benchmark.cjs" --gateway http://127.0.0.1:5431 --out ./tmp/benchmarks
     
@@ -219,9 +227,17 @@ echo ""
 echo "=> Starting benchmark for $FULL_MODEL with contexts: $CONTEXTS"
 echo ""
 
+EXTRA_FLAGS=""
+if [[ "$FULL_MODEL" == *"GLM-5.1"* ]]; then
+    EXTRA_FLAGS="--ssd-only"
+    echo "Note: GLM-5.1 is very large. Restricting to SSD streaming configurations only."
+    echo ""
+fi
+
 python3 -u scripts/profiling/profile_runner.py \
   --model "$FULL_MODEL" \
   --contexts "$CONTEXTS" \
+  $EXTRA_FLAGS \
   --out "./profiling_results_$(hostname -s).md"
 
 echo ""

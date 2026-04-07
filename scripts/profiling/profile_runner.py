@@ -116,8 +116,13 @@ def main():
     parser.add_argument("--model", required=True, help="Model ID (e.g. gemma-4-26b-a4b-it-4bit)")
     parser.add_argument("--out", default="./profiling_results.md", help="Output markdown file path")
     parser.add_argument("--contexts", default="512", help="Comma-separated list of context lengths to test (e.g. 512,40000,100000)")
+    parser.add_argument("--ssd-only", action="store_true", help="Only run SSD configurations")
     args = parser.parse_args()
     
+    global CONFIGS
+    if args.ssd_only:
+        CONFIGS = [c for c in CONFIGS if "--stream-experts" in c["flags"]]
+
     # SwiftLM handles model downloading natively via HubApi.
     # Just pass the model ID directly — prepend mlx-community/ if no org is specified.
     model_id = args.model if "/" in args.model else f"mlx-community/{args.model}"

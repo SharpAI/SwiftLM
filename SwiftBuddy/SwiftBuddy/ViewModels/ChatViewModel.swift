@@ -71,6 +71,17 @@ final class ChatViewModel: ObservableObject {
                 fullMessages.insert(.user("SYSTEM DIRECTIVE & CONTEXT:\n\(dynamicSystemPrompt)"), at: 0)
             }
         }
+        
+        // Squash consecutive roles to prevent Jinja alternation crashes on strict models (e.g., Gemma)
+        var collapsedMessages: [ChatMessage] = []
+        for msg in fullMessages {
+            if let last = collapsedMessages.last, last.role == msg.role {
+                collapsedMessages[collapsedMessages.count - 1].content += "\n\n" + msg.content
+            } else {
+                collapsedMessages.append(msg)
+            }
+        }
+        fullMessages = collapsedMessages
 
         generationTask = Task {
             var response = ""

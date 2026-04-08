@@ -250,6 +250,12 @@ public final class HFModelSearchService: ObservableObject {
                 var page = try JSONDecoder().decode([HFModelResult].self, from: data)
                 let originalPageCount = page.count
 
+                // Strip GGUF models explicitly (SwiftLM engine only locally loads MLX tensors)
+                page = page.filter { result in
+                    let isGGUF = result.formatDisplay == "GGUF" || result.id.lowercased().contains("gguf")
+                    return !isGGUF
+                }
+
                 // Local Size Filtering
                 if currentSizeFilter != .all {
                     page = page.filter { currentSizeFilter.matches($0.paramSizeHint) }

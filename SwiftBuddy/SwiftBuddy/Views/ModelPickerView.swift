@@ -114,13 +114,30 @@ private struct CatalogTab: View {
     }
 
     var body: some View {
-        List {
-            deviceHeader
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                deviceHeader
 
-            if !downloadManager.downloadedModels.isEmpty {
-                Section {
-                    ForEach(downloadManager.downloadedModels) { downloaded in
-                        if let entry = ModelCatalog.all.first(where: { $0.id == downloaded.id }) {
+                if !downloadManager.downloadedModels.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Downloaded")
+                                .font(.headline)
+                            Spacer()
+                            Button("Manage") { showManagement = true }
+                                .font(.caption)
+                        }
+                        
+                        ForEach(downloadManager.downloadedModels) { downloaded in
+                            let entry = ModelCatalog.all.first(where: { $0.id == downloaded.id }) ?? ModelEntry(
+                                id: downloaded.id,
+                                displayName: String(downloaded.id.split(separator: "/").last ?? ""),
+                                parameterSize: "Hub Model",
+                                quantization: "Native",
+                                ramRequiredGB: 0,
+                                ramRecommendedGB: 0
+                            )
+                            
                             ModelRow(
                                 model: entry,
                                 downloadStatus: .downloaded(sizeString: downloaded.displaySize),
@@ -131,47 +148,45 @@ private struct CatalogTab: View {
                             )
                         }
                     }
-                } header: {
-                    HStack {
-                        Text("Downloaded")
-                        Spacer()
-                        Button("Manage") { showManagement = true }
-                            .font(.caption)
-                    }
+                    Divider()
                 }
-            }
 
-            if !recommendedModels.isEmpty {
-                Section("Recommended for your device") {
-                    ForEach(recommendedModels) { model in
-                        ModelRow(
-                            model: model,
-                            downloadStatus: downloadManager.isDownloaded(model.id) ? .downloaded(sizeString: "") : .available,
-                            fitStatus: ModelCatalog.fitStatus(for: model, on: device),
-                            downloadProgress: downloadManager.activeDownloads[model.id],
-                            onTap: { onTap(model.id) },
-                            onDelete: nil
-                        )
+                if !recommendedModels.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Recommended for your device")
+                            .font(.headline)
+                        ForEach(recommendedModels) { model in
+                            ModelRow(
+                                model: model,
+                                downloadStatus: downloadManager.isDownloaded(model.id) ? .downloaded(sizeString: "") : .available,
+                                fitStatus: ModelCatalog.fitStatus(for: model, on: device),
+                                downloadProgress: downloadManager.activeDownloads[model.id],
+                                onTap: { onTap(model.id) },
+                                onDelete: nil
+                            )
+                        }
                     }
+                    Divider()
                 }
-            }
 
-            if !otherModels.isEmpty {
-                Section("All Models") {
-                    ForEach(otherModels) { model in
-                        ModelRow(
-                            model: model,
-                            downloadStatus: downloadManager.isDownloaded(model.id) ? .downloaded(sizeString: "") : .available,
-                            fitStatus: ModelCatalog.fitStatus(for: model, on: device),
-                            downloadProgress: downloadManager.activeDownloads[model.id],
-                            onTap: { onTap(model.id) },
-                            onDelete: nil
-                        )
+                if !otherModels.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("All Models")
+                            .font(.headline)
+                        ForEach(otherModels) { model in
+                            ModelRow(
+                                model: model,
+                                downloadStatus: downloadManager.isDownloaded(model.id) ? .downloaded(sizeString: "") : .available,
+                                fitStatus: ModelCatalog.fitStatus(for: model, on: device),
+                                downloadProgress: downloadManager.activeDownloads[model.id],
+                                onTap: { onTap(model.id) },
+                                onDelete: nil
+                            )
+                        }
                     }
+                    Divider()
                 }
-            }
-            
-            Section {
+                
                 Button(action: onSearchHFTap) {
                     HStack {
                         Image(systemName: "magnifyingglass")
@@ -185,33 +200,34 @@ private struct CatalogTab: View {
                 }
                 .buttonStyle(.plain)
             }
+            .padding()
         }
-        .listStyle(.inset)
     }
 
     private var deviceHeader: some View {
-        Section {
-            HStack(spacing: 12) {
-                Image(systemName: "memorychip")
-                    .font(.title2)
-                    .foregroundStyle(.blue)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Apple Silicon")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                    Text(String(format: "%.0f GB RAM", device.physicalRAMGB))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if downloadManager.isOffline {
-                    Label("Offline", systemImage: "wifi.slash")
-                        .font(.caption.bold())
-                        .foregroundStyle(.orange)
-                }
+        HStack(spacing: 12) {
+            Image(systemName: "memorychip")
+                .font(.title2)
+                .foregroundStyle(.blue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Apple Silicon")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(String(format: "%.0f GB RAM", device.physicalRAMGB))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .padding(.vertical, 4)
+            Spacer()
+            if downloadManager.isOffline {
+                Label("Offline", systemImage: "wifi.slash")
+                    .font(.caption.bold())
+                    .foregroundStyle(.orange)
+            }
         }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+        .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.bottom, 8)
     }
 }
 

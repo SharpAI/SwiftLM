@@ -80,6 +80,58 @@ final class MemoryPalaceService {
         return true
     }
     
+    @discardableResult
+    func saveMemories(wingName: String, roomName: String, texts: [String], type: String = "Facts") throws -> Int {
+        guard let context = modelContext else { throw URLError(.badServerResponse) }
+        guard !texts.isEmpty else { return 0 }
+        
+        let fetchWing = FetchDescriptor<PalaceWing>(predicate: #Predicate { $0.name == wingName })
+        let wing = (try? context.fetch(fetchWing).first) ?? {
+            let w = PalaceWing(name: wingName)
+            context.insert(w)
+            return w
+        }()
+        
+        let fetchRoom = FetchDescriptor<PalaceRoom>(predicate: #Predicate { $0.name == roomName && $0.wing?.name == wingName })
+        let room = (try? context.fetch(fetchRoom).first) ?? {
+            let r = PalaceRoom(name: roomName, wing: wing)
+            context.insert(r)
+            return r
+        }()
+        
+        let fetchDesc = FetchDescriptor<MemoryEntry>()
+        let existingMemories = (try? context.fetch(fetchDesc).filter { $0.room?.name == roomName && $0.room?.wing?.name == wingName }) ?? []
+        var existingVectors = existingMemories.compactMap { $0.embedding }
+        
+        var savedCount = 0
+        
+        // Batch embedding extraction and insertion
+        for text in texts {
+            guard let vector = generateEmbedding(for: text) else { continue }
+            
+            var isDuplicate = false
+            for emb in existingVectors {
+                if cosineSimilarity(a: vector, b: emb) > 0.95 {
+                    isDuplicate = true
+                    break
+                }
+            }
+            if isDuplicate { continue }
+            
+            let entry = MemoryEntry(text: text, hallType: type, embedding: vector, room: room)
+            context.insert(entry)
+            existingVectors.append(vector)
+            savedCount += 1
+        }
+        
+        // Single synchronized database transaction
+        if savedCount > 0 {
+            try context.save()
+        }
+        
+        return savedCount
+    }
+    
     func searchMemories(query: String, wingName: String, roomName: String? = nil, hallType: String? = nil, topK: Int = 5) throws -> [MemoryEntry] {
         guard let context = modelContext else { throw URLError(.badServerResponse) }
         guard let queryVector = generateEmbedding(for: query) else { return [] }

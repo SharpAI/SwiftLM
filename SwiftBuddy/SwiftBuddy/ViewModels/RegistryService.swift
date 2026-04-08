@@ -90,14 +90,12 @@ public final class RegistryService: ObservableObject {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
                 
-            for chunk in chunks {
-                try? MemoryPalaceService.shared.saveMemory(
-                    wingName: "Einstein Localized",
-                    roomName: "corpus",
-                    text: chunk,
-                    type: "hall_facts"
-                )
-            }
+            try? MemoryPalaceService.shared.saveMemories(
+                wingName: "Einstein Localized",
+                roomName: "corpus",
+                texts: chunks,
+                type: "hall_facts"
+            )
             
             lastSyncLog = "Successfully installed Einstein Localized!"
             isSyncing = false
@@ -128,14 +126,12 @@ public final class RegistryService: ObservableObject {
                         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                         .filter { !$0.isEmpty }
                     
-                    for chunk in chunks {
-                        try? MemoryPalaceService.shared.saveMemory(
-                            wingName: name.replacingOccurrences(of: "_", with: " "),
-                            roomName: roomName.replacingOccurrences(of: "_", with: " "),
-                            text: chunk,
-                            type: roomName.lowercased() == "corpus" ? "hall_facts" : "hall_preferences"
-                        )
-                    }
+                    try? MemoryPalaceService.shared.saveMemories(
+                        wingName: name.replacingOccurrences(of: "_", with: " "),
+                        roomName: roomName.replacingOccurrences(of: "_", with: " "),
+                        texts: chunks,
+                        type: roomName.lowercased() == "corpus" ? "hall_facts" : "hall_preferences"
+                    )
                 }
             } catch {
                 print("[RegistryService] Network error downloading \(roomFile): \(error)")

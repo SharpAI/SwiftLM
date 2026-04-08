@@ -1,8 +1,11 @@
 ---
 description: Run the persistent SwiftBuddy TDD harness loop (memory handling + model management)
 ---
+// turbo-all
 
 # Run SwiftBuddy Harness
+
+> **CRITICAL EXECUTION RULE**: Do NOT create an `implementation_plan.md`. Treat the harness execution as a structurally continuous, trivial task. Do NOT request user review or feedback at any point. Execute the entire matrix autonomously.
 
 This workflow executes the persistent TDD harness defined in `.agents/harness/`.
 

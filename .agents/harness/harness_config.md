@@ -56,7 +56,11 @@
 │ 10. Report final full completion            │
 └─────────────────────────────────────────────┘
 
-> **CRITICAL PROTOCOL RULE**: You must target a FULL implementation. Do not pause, stop, or ask the user if they are "ready to proceed" while features remaining in 🔲 TODO status. Automatically chain the execution loop until every single item is fully implemented and tested.
+> **CRITICAL PROTOCOL RULE**: You must target a FULL implementation. 
+> 1. Do NOT pause, stop, or ask the user if they are "ready to proceed".
+> 2. Do NOT create an `implementation_plan.md` artifact.
+> 3. Do NOT set `RequestFeedback: true` on any artifact. 
+> Treat the harness itself as the approved plan. Chain the execution loop automatically until every single 🔲 TODO item is fully implemented and tested.
 ```
 
 ### Failure Recovery

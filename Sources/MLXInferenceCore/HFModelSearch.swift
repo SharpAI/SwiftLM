@@ -27,8 +27,8 @@ public struct HFModelResult: Identifiable, Sendable, Decodable {
     /// Best-effort parameter size extracted from the model ID name.
     public var paramSizeHint: String? {
         let patterns = [
-            #"(\d+\.?\d*)[Bb]"#,   // 7B, 0.5B, 3.8B
-            #"(\d+)[xX](\d+)[Bb]"# // 8x7B MoE
+            #"(\d+)[xX](\d+)[Bb]"#, // 8x7B MoE
+            #"(\d+\.?\d*)[Bb]"#    // 7B, 0.5B, 3.8B
         ]
         for pattern in patterns {
             if let match = repoName.range(of: pattern, options: .regularExpression) {

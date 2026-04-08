@@ -380,11 +380,15 @@ private struct HFModelRow: View {
                         if model.isMlxCommunity {
                             badge("mlx-community", color: .blue)
                         }
+                        badge(model.formatDisplay, color: model.formatDisplay == "GGUF" ? .indigo : .mint)
                         if model.isMoE {
                             badge("MoE", color: .purple)
                         }
                         if let size = model.paramSizeHint {
                             badge(size, color: .orange)
+                        }
+                        if let storage = model.storageDisplay {
+                            badge(storage, color: .gray)
                         }
                     }
                 }

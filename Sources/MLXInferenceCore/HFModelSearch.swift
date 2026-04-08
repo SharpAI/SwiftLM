@@ -18,11 +18,30 @@ public struct HFModelResult: Identifiable, Sendable, Decodable {
     public let downloads: Int?
     public let pipeline_tag: String?    // "text-generation"
     public let tags: [String]?
+    
+    // Dynamically fetched after initial list
+    public var usedStorage: Int64? = nil
 
     // Computed helpers
     public var repoOwner: String { String(id.split(separator: "/").first ?? "") }
     public var repoName: String  { String(id.split(separator: "/").last  ?? "") }
     public var isMlxCommunity: Bool { repoOwner == "mlx-community" }
+
+    public var formatDisplay: String {
+        guard let t = tags else { return "MLX" }
+        if t.contains("gguf") { return "GGUF" }
+        if t.contains("safetensors") { return "MLX" }
+        return "MLX" // Default assumption from mlx-community
+    }
+
+    public var storageDisplay: String? {
+        guard let s = usedStorage else { return nil }
+        if s >= 1_000_000_000 {
+            return String(format: "%.1f GB", Double(s) / 1_000_000_000)
+        } else {
+            return String(format: "%.1f MB", Double(s) / 1_000_000)
+        }
+    }
 
     /// Best-effort parameter size extracted from the model ID name.
     public var paramSizeHint: String? {
@@ -172,8 +191,32 @@ public final class HFModelSearchService: ObservableObject {
             }
             
             do {
-                let page = try JSONDecoder().decode([HFModelResult].self, from: data)
-                print("HFSearch: Decoded \(page.count) models")
+                var page = try JSONDecoder().decode([HFModelResult].self, from: data)
+                print("HFSearch: Decoded \(page.count) models. Fetching storage sizes...")
+                
+                // Fetch usedStorage for each model in parallel
+                try await withThrowingTaskGroup(of: (Int, Int64?).self) { group in
+                    for i in 0..<page.count {
+                        group.addTask {
+                            let detailUrl = URL(string: "https://huggingface.co/api/models/\(page[i].id)")!
+                            let (detailData, _) = try await URLSession.shared.data(from: detailUrl)
+                            
+                            struct HFFullDetails: Decodable {
+                                let usedStorage: Int64?
+                            }
+                            
+                            let details = try? JSONDecoder().decode(HFFullDetails.self, from: detailData)
+                            return (i, details?.usedStorage)
+                        }
+                    }
+                    
+                    for try await (index, size) in group {
+                        if let size = size {
+                            page[index].usedStorage = size
+                        }
+                    }
+                }
+                
                 results.append(contentsOf: page)
                 hasMore = page.count == pageSize
                 currentOffset += page.count

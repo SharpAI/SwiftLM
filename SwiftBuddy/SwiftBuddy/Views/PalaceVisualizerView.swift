@@ -3,10 +3,12 @@ import SwiftUI
 import SwiftData
 
 struct PalaceVisualizerView: View {
+    @Environment(\.dismiss) private var dismiss
     @Query(sort: \PalaceWing.createdDate) var wings: [PalaceWing]
     @State private var expandedRooms: Set<String> = []
     
     var body: some View {
+        ZStack(alignment: .topTrailing) {
         ScrollView([.horizontal, .vertical], showsIndicators: true) {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(wings) { wing in
@@ -39,6 +41,17 @@ struct PalaceVisualizerView: View {
             .padding(60)
         }
         .background(SwiftBuddyTheme.background.ignoresSafeArea())
+        
+        #if os(macOS)
+            Button(action: { dismiss() }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 24))
+                    .foregroundStyle(.secondary.opacity(0.8))
+            }
+            .buttonStyle(.plain)
+            .padding(20)
+        #endif
+        }
         #if os(macOS)
         .navigationTitle("Palace Visualizer")
         #endif

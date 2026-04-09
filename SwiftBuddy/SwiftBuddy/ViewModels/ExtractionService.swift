@@ -31,8 +31,15 @@ public final class ExtractionService: ObservableObject {
         lastLog = "Starting Extraction for Wing: \(wing)..."
         
         let systemPrompt = """
-        You are a Memory Palace extraction engine.
-        Analyze the following raw text. Identify highly specific facts, events, and biographical preferences.
+        You are a highly intelligent Memory Palace extraction engine.
+        Analyze the following raw text and distill it into highly specific, cohesive, and timeless facts or events.
+        
+        CRITICAL RULES:
+        1. DO NOT regurgitate raw text line-by-line. You must synthesize the data.
+        2. Combine fragmented sentences, dates, and titles into rich, complete paragraph-length facts.
+        3. IGNORE boilerplate, headers, copyright notices, and irrelevant metadata (e.g. 'Volume 1', 'Translated by', 'Project Gutenberg').
+        4. Each extracted fact MUST be a complete, descriptive sentence of at least 15 words.
+        
         OUTPUT STRICTLY IN THE FOLLOWING JSON FORMAT ONLY. NEVER Output conversational text.
         
         {
@@ -40,7 +47,7 @@ public final class ExtractionService: ObservableObject {
             {
               "room": "Topic Category (e.g., 'Career', 'Physics', 'Personal')",
               "hall": "Category Type (must be either: 'hall_facts', 'hall_events', 'hall_discoveries', 'hall_preferences', 'hall_advice')",
-              "fact": "The extracted fact written as a concise, timeless statement."
+              "fact": "The synthesized extract written as a comprehensive, timeless statement."
             }
           ]
         }

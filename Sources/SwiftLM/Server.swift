@@ -531,7 +531,7 @@ struct MLXServer: AsyncParsableCommand {
             var partitionJson = ""
             if let plan = partitionPlan {
                 let isSSD = isSSDStream
-                var pData: [String: Any] = [
+                let pData: [String: Any] = [
                     "strategy": isSSD ? "ssd_streaming" : plan.strategy.rawValue,
                     "overcommit_ratio": round(plan.overcommitRatio * 100) / 100,
                     "model_weight_gb": round(plan.weightMemoryGB * 10) / 10,
@@ -688,7 +688,7 @@ struct MLXServer: AsyncParsableCommand {
             "engine": "mlx",
             "vision": isVision
         ]
-        if var plan = partitionPlan {
+        if let plan = partitionPlan {
             var info = plan.healthInfo
             if self.streamExperts {
                 // SSD streaming bypasses swap — report accurate strategy and suppress swap estimate

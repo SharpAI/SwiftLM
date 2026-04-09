@@ -20,8 +20,10 @@ codesign --force --deep --sign - "$APP_PATH"
 echo "=========================================="
 echo "2. Package Ad-Hoc build into DMG"
 echo "=========================================="
+# Extract marketing version number directly from the compiled app's bundle
+VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PATH/Contents/Info.plist" || echo "latest")
 mkdir -p output
-DMG_NAME="SwiftBuddy-macOS.dmg"
+DMG_NAME="SwiftBuddy-macOS-v${VERSION}.dmg"
 
 create-dmg \
   --volname "SwiftBuddy" \

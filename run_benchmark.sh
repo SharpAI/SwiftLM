@@ -12,16 +12,17 @@ echo "Select Action:"
 echo "1) Test 1: Automated Context & Memory Profile (TPS & RAM matrix)"
 echo "2) Test 2: Prompt Cache & Sliding Window Regression Test"
 echo "3) Test 3: HomeSec Benchmark (LLM Only)"
-echo "4) Model Maintain List and Delete"
-echo "5) Quit"
-read -p "Option (1-5): " suite_opt
+echo "4) Test 4: VLM End-to-End Evaluation"
+echo "5) Model Maintain List and Delete"
+echo "6) Quit"
+read -p "Option (1-6): " suite_opt
 
-if [ "$suite_opt" == "5" ] || [ -z "$suite_opt" ]; then
+if [ "$suite_opt" == "6" ] || [ -z "$suite_opt" ]; then
     echo "Exiting."
     exit 0
 fi
 
-if [ "$suite_opt" == "4" ]; then
+if [ "$suite_opt" == "5" ]; then
     echo ""
     echo "=> Downloaded Models Maintenance"
     CACHE_DIR="$HOME/.cache/huggingface/hub"
@@ -216,6 +217,67 @@ if [ "$suite_opt" == "3" ]; then
     echo "Cleaning up..."
     killall SwiftLM
     wait $SERVER_PID 2>/dev/null
+    exit 0
+fi
+
+if [ "$suite_opt" == "4" ]; then
+    echo ""
+    echo "=> Starting Test 4: VLM End-to-End Evaluation on $FULL_MODEL"
+    echo "Looking for a test image..."
+    
+    mkdir -p tmp
+    IMAGE_PATH="./tmp/dog.jpg"
+    # Download a small but recognizable image of a dog (golden retriever puppy)
+    curl -sL "https://images.unsplash.com/photo-1543466835-00a7907e9de1?auto=format&fit=crop&q=80&w=320" -o "$IMAGE_PATH"
+    
+    if [ ! -f "$IMAGE_PATH" ]; then
+        echo "Failed to download image."
+        exit 1
+    fi
+    
+    echo "Encoding image to base64..."
+    BASE64_IMG=$(base64 -i "$IMAGE_PATH" | tr -d '\n')
+    
+    echo "Generating /tmp/vlm_payload.json..."
+    cat <<EOF > /tmp/vlm_payload.json
+{
+  "model": "$FULL_MODEL",
+  "max_tokens": 100,
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What is in this image? Explain concisely."},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,${BASE64_IMG}"}}
+      ]
+    }
+  ]
+}
+EOF
+
+    echo "Starting Server in background with --vision..."
+    killall SwiftLM 2>/dev/null
+    $BIN --model "$FULL_MODEL" --vision --port 5431 > ./tmp/vlm_server.log 2>&1 &
+    SERVER_PID=$!
+    
+    echo "Waiting for server to be ready on port 5431 (this may take a minute if downloading)..."
+    for i in {1..300}; do
+        if curl -s http://127.0.0.1:5431/health > /dev/null; then break; fi
+        sleep 1
+    done
+    
+    echo ""
+    echo "Server is up! Sending payload..."
+    echo "=== VLM Request ==="
+    curl -sS --max-time 180 http://127.0.0.1:5431/v1/chat/completions -H "Content-Type: application/json" -d @/tmp/vlm_payload.json | python3 -c "import sys,json;d=json.load(sys.stdin);print('\n🤖 VLM Output:', d.get('choices',[{}])[0].get('message',{}).get('content', 'ERROR'))"
+    
+    echo ""
+    echo "✅ Test Complete!"
+    
+    echo "Cleaning up..."
+    killall SwiftLM
+    wait $SERVER_PID 2>/dev/null
+    rm -f /tmp/vlm_payload.json "$IMAGE_PATH"
     exit 0
 fi
 

@@ -50,7 +50,12 @@ This workflow executes the persistent TDD harness defined in `.agents/harness/`.
    echo -e "4\n11\nmlx-community/Qwen2-VL-2B-Instruct-4bit" | ./run_benchmark.sh
    ```
 
-9. Write a timestamped run log to the appropriate `runs/` directory detailing the status and test output.
+9. Validate ALM pipeline with real-world End-to-End processing:
+   ```bash
+   echo -e "5\n11\nmlx-community/Whisper-large-v3-mlx" | ./run_benchmark.sh
+   ```
 
-10. Report completion: list all features with their final status.
+10. Write a timestamped run log to the appropriate `runs/` directory detailing the status and test output.
+
+11. Report completion: list all features with their final status.
 

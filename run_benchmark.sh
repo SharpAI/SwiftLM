@@ -13,16 +13,17 @@ echo "1) Test 1: Automated Context & Memory Profile (TPS & RAM matrix)"
 echo "2) Test 2: Prompt Cache & Sliding Window Regression Test"
 echo "3) Test 3: HomeSec Benchmark (LLM Only)"
 echo "4) Test 4: VLM End-to-End Evaluation"
-echo "5) Model Maintain List and Delete"
-echo "6) Quit"
-read -p "Option (1-6): " suite_opt
+echo "5) Test 5: ALM Audio End-to-End Evaluation"
+echo "6) Model Maintain List and Delete"
+echo "7) Quit"
+read -p "Option (1-7): " suite_opt
 
-if [ "$suite_opt" == "6" ] || [ -z "$suite_opt" ]; then
+if [ "$suite_opt" == "7" ] || [ -z "$suite_opt" ]; then
     echo "Exiting."
     exit 0
 fi
 
-if [ "$suite_opt" == "5" ]; then
+if [ "$suite_opt" == "6" ]; then
     echo ""
     echo "=> Downloaded Models Maintenance"
     CACHE_DIR="$HOME/.cache/huggingface/hub"
@@ -278,6 +279,71 @@ EOF
     killall SwiftLM
     wait $SERVER_PID 2>/dev/null
     rm -f /tmp/vlm_payload.json "$IMAGE_PATH"
+    exit 0
+fi
+
+if [ "$suite_opt" == "5" ]; then
+    echo ""
+    echo "=> Starting Test 5: ALM Audio End-to-End Evaluation on $FULL_MODEL"
+    echo "Looking for a test audio payload..."
+    
+    mkdir -p tmp
+    AUDIO_PATH="./tmp/audio_test"
+    # Small test audio clip (we assume standard tools and curl).
+    curl -sL "https://cdn.freesound.org/previews/16/16287_35552-lq.mp3" -o "${AUDIO_PATH}.mp3" 
+    
+    echo "Converting MP3 to WAV for engine pipeline ingestion..."
+    # afconvert converts mp3 to standardized WAV under macOS natively without ffmpeg dependencies
+    afconvert -f WAVE -d pcm16 "${AUDIO_PATH}.mp3" "${AUDIO_PATH}.wav" 
+    
+    if [ ! -f "${AUDIO_PATH}.wav" ]; then
+        echo "Failed to convert audio via afconvert."
+        exit 1
+    fi
+    
+    echo "Encoding audio to base64..."
+    BASE64_AUDIO=$(base64 -i "${AUDIO_PATH}.wav" | tr -d '\n')
+    
+    echo "Generating /tmp/alm_payload.json..."
+    cat <<EOF > /tmp/alm_payload.json
+{
+  "model": "$FULL_MODEL",
+  "max_tokens": 100,
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Transcribe this audio strictly."},
+        {"type": "input_audio", "input_audio": {"data": "${BASE64_AUDIO}", "format": "wav"}}
+      ]
+    }
+  ]
+}
+EOF
+
+    echo "Starting Server in background with --audio..."
+    killall SwiftLM 2>/dev/null
+    $BIN --model "$FULL_MODEL" --audio --port 5431 > ./tmp/alm_server.log 2>&1 &
+    SERVER_PID=$!
+    
+    echo "Waiting for server to be ready on port 5431 (this may take a minute if downloading)..."
+    for i in {1..300}; do
+        if curl -s http://127.0.0.1:5431/health > /dev/null; then break; fi
+        sleep 1
+    done
+    
+    echo ""
+    echo "Server is up! Sending payload..."
+    echo "=== ALM Request ==="
+    curl -sS --max-time 180 http://127.0.0.1:5431/v1/chat/completions -H "Content-Type: application/json" -d @/tmp/alm_payload.json | python3 -c "import sys,json;d=json.load(sys.stdin);print('\n🎤 ALM Output:', d.get('choices',[{}])[0].get('message',{}).get('content', 'ERROR'))"
+    
+    echo ""
+    echo "✅ Test Complete!"
+    
+    echo "Cleaning up..."
+    killall SwiftLM
+    wait $SERVER_PID 2>/dev/null
+    rm -f /tmp/alm_payload.json "${AUDIO_PATH}.wav" "${AUDIO_PATH}.mp3"
     exit 0
 fi
 

@@ -144,6 +144,16 @@ public enum ModelCatalog {
             isMoE: true,
             badge: "⚡ MoE Turbo"
         ),
+        ModelEntry(
+            id: "mlx-community/Qwen3.5-122B-A10B-4bit",
+            displayName: "Qwen 3.5 122B MoE",
+            parameterSize: "122B (active 10B)",
+            quantization: "4-bit",
+            ramRequiredGB: 8.0,
+            ramRecommendedGB: 16.0,
+            isMoE: true,
+            badge: "🏔️ Frontier MoE"
+        ),
     ]
 
     /// Hand-curated selection of the best models for general use.

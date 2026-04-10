@@ -3,16 +3,28 @@ import Foundation
 
 final class AudioTests: XCTestCase {
 
-    // Feature 1: --audio flag is accepted without crash
     func testAudio_AudioFlagAccepted() async throws {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        // Note: Testing with a lightweight model, or just asserting that SwiftLM prints its launch message.
-        let args = ["swift", "run", "SwiftLM", "--model", "mlx-community/Qwen2.5-0.5B-Instruct-4bit", "--audio"]
-        process.arguments = args
         
-        let projectPath = URL(fileURLWithPath: #file).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        process.currentDirectoryURL = projectPath
+        let projectRoot = URL(fileURLWithPath: #file)
+            .deletingLastPathComponent() // SwiftBuddyTests
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // SwiftLM
+            
+        let debugExecutableURL = projectRoot.appendingPathComponent(".build/arm64-apple-macosx/debug/SwiftLM")
+        let releaseExecutableURL = projectRoot.appendingPathComponent(".build/arm64-apple-macosx/release/SwiftLM")
+        
+        let executableURL = FileManager.default.fileExists(atPath: debugExecutableURL.path) 
+                            ? debugExecutableURL 
+                            : releaseExecutableURL
+        
+        guard FileManager.default.fileExists(atPath: executableURL.path) else {
+            XCTFail("Could not find SwiftLM executable at \(debugExecutableURL.path)")
+            return
+        }
+        
+        process.executableURL = executableURL
+        process.arguments = ["--model", "mlx-community/Qwen2-VL-2B-Instruct-4bit", "--audio"]
         
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -20,7 +32,6 @@ final class AudioTests: XCTestCase {
         
         try process.run()
         
-        // Wait up to 15 seconds to grab standard output up to the "Loading" print
         let start = Date()
         var foundLoading = false
         var accumulated = ""

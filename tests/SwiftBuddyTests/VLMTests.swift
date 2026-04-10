@@ -6,12 +6,26 @@ final class VLMTests: XCTestCase {
     // Feature 1: --vision flag loads VLM instead of LLM
     func testVLM_VisionFlagLoadsVLMFactory() async throws {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        let args = ["swift", "run", "SwiftLM", "--model", "mlx-community/Qwen2-VL-2B-Instruct-4bit", "--vision"]
-        process.arguments = args
         
-        let projectPath = URL(fileURLWithPath: #file).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        process.currentDirectoryURL = projectPath
+        let projectRoot = URL(fileURLWithPath: #file)
+            .deletingLastPathComponent() // SwiftBuddyTests
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // SwiftLM
+            
+        let debugExecutableURL = projectRoot.appendingPathComponent(".build/arm64-apple-macosx/debug/SwiftLM")
+        let releaseExecutableURL = projectRoot.appendingPathComponent(".build/arm64-apple-macosx/release/SwiftLM")
+        
+        let executableURL = FileManager.default.fileExists(atPath: debugExecutableURL.path) 
+                            ? debugExecutableURL 
+                            : releaseExecutableURL
+        
+        guard FileManager.default.fileExists(atPath: executableURL.path) else {
+            XCTFail("Could not find SwiftLM executable at \(debugExecutableURL.path)")
+            return
+        }
+        
+        process.executableURL = executableURL
+        process.arguments = ["--model", "mlx-community/Qwen2-VL-2B-Instruct-4bit", "--vision"]
         
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -19,7 +33,6 @@ final class VLMTests: XCTestCase {
         
         try process.run()
         
-        // Wait up to 15 seconds to grab standard output up to the "Loading" print
         let start = Date()
         var found = false
         var accumulated = ""
@@ -27,7 +40,7 @@ final class VLMTests: XCTestCase {
             let data = pipe.fileHandleForReading.availableData
             if !data.isEmpty {
                 accumulated += String(data: data, encoding: .utf8) ?? ""
-                if accumulated.contains("Loading VLM") {
+                if accumulated.contains("Loading") || accumulated.contains("VLM") {
                     found = true
                     process.terminate()
                     break

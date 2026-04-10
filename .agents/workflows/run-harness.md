@@ -1,5 +1,5 @@
 ---
-description: Run the persistent SwiftBuddy TDD harness loop (memory handling + model management)
+description: Run the persistent SwiftBuddy TDD harness loop (memory handling + model management + VLM + audio)
 ---
 // turbo-all
 
@@ -27,12 +27,25 @@ This workflow executes the persistent TDD harness defined in `.agents/harness/`.
    - Load any relevant fixture files from `.agents/harness/model-management/fixtures/`.
    - Follow the Agent Loop Protocol: write test → run → implement → verify → update status.
 
+5. **VLM Pipeline Harness**:
+   - Read `.agents/harness/vlm/features.md` to find all 🔲 TODO items.
+   - For each TODO, read the acceptance criteria in `.agents/harness/vlm/acceptance.md`.
+   - Load any relevant fixture files from `.agents/harness/vlm/fixtures/`.
+   - Follow the Agent Loop Protocol: write test → run → implement → verify → update status.
+
+6. **Audio Pipeline Harness**:
+   - Read `.agents/harness/audio/features.md` to find all 🔲 TODO items.
+   - For each TODO, read the acceptance criteria in `.agents/harness/audio/acceptance.md`.
+   - Load any relevant fixture files from `.agents/harness/audio/fixtures/`.
+   - Follow the Agent Loop Protocol: write test → run → implement → verify → update status.
+
 // turbo-all
-5. Run the test suite:
+7. Run the test suite:
    ```
    swift test --filter SwiftBuddyTests
    ```
 
-6. Write a timestamped run log to the appropriate `runs/` directory.
+8. Write a timestamped run log to the appropriate `runs/` directory.
 
-7. Report completion: list all features with their final status.
+9. Report completion: list all features with their final status.
+

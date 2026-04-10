@@ -1,5 +1,8 @@
 # ⚡️ SwiftLM
 
+> [!WARNING]
+> **DEVELOPMENT NOTE:** The `mlx-swift-lm` SPM dependency is currently locked to the unmerged testing branch `feature/papps-ssd-streaming`. Do not merge to `main` without completing the module integration tests and reverting the URL target constraints.
+
 A blazingly fast, native Swift inference server that serves [MLX](https://github.com/ml-explore/mlx) models with a strict **OpenAI-compatible API**. 
 
 No Python runtime, no Global Interpreter Lock (GIL), no unnecessary memory copies. Just bare-metal Apple Silicon performance compiled to a single binary.

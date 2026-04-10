@@ -107,6 +107,10 @@ echo ""
 PS3="Select a model to use: "
 if [ "$suite_opt" == "4" ]; then
     options=(
+        "gemma-4-26b-a4b-it-8bit"
+        "gemma-4-31b-it-8bit"
+        "gemma-4-e4b-it-8bit"
+        "gemma-4-2b-a4b-it-4bit"
         "mlx-community/Qwen2-VL-2B-Instruct-4bit"
         "mlx-community/Qwen2-VL-7B-Instruct-4bit"
         "mlx-community/pixtral-12b-2409-4bit"
@@ -115,6 +119,8 @@ if [ "$suite_opt" == "4" ]; then
     )
 elif [ "$suite_opt" == "5" ]; then
     options=(
+        "gemma-4-e4b-it-8bit"
+        "gemma-4-2b-a4b-it-4bit"
         "mlx-community/Qwen2-Audio-7B-Instruct"
         "Custom (Enter your own Hub ID)"
         "Quit"

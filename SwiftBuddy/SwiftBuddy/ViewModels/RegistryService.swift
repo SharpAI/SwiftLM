@@ -1,5 +1,8 @@
 import Foundation
 import SwiftData
+#if canImport(MLXInferenceCore)
+import MLXInferenceCore
+#endif
 
 struct GithubNode: Codable, Identifiable {
     var id: String { name }
@@ -78,7 +81,7 @@ public final class RegistryService: ObservableObject {
         isSyncing = false
     }
     
-    public func downloadPersona(name: String) async {
+    public func downloadPersona(name: String, using engine: InferenceEngine? = nil) async {
         guard !isSyncing else { return }
         isSyncing = true
         lastSyncLog = "Downloading \(name)..."
@@ -147,7 +150,30 @@ public final class RegistryService: ObservableObject {
         }
         
         if fetchedAny {
-            lastSyncLog = "Successfully installed \(name.replacingOccurrences(of: "_", with: " "))!"
+            let friendlyName = name.replacingOccurrences(of: "_", with: " ")
+            lastSyncLog = "SYNAPTIC SYNTHESIS FOR \(friendlyName)..."
+            
+            // Phase 2 Extraction: Vector-Driven Persona Synthesis
+            do {
+                if let engine = engine {
+#if canImport(MLXInferenceCore)
+                    try await MemoryPalaceService.shared.synthesizePersonaIndex(wingName: friendlyName, using: engine) { [weak self] (current: Int, total: Int, text: String) in
+                        Task { @MainActor in
+                            self?.extractionPhase = text
+                            self?.extractionProcessed = current
+                            self?.extractionTotal = total
+                            self?.currentChunkText = ""
+                        }
+                    }
+#endif
+                } else {
+                    print("[RegistryService] WARNING: Engine not injected. Persona Synthesis bypassed.")
+                }
+            } catch {
+                print("[RegistryService] Persona Synthesis failed: \(error)")
+            }
+            
+            lastSyncLog = "Successfully installed \(friendlyName)!"
         } else {
              lastSyncLog = "Failed to download \(name)."
         }

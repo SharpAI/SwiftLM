@@ -2,6 +2,10 @@ import Foundation
 import SwiftData
 import NaturalLanguage
 
+#if canImport(MLXInferenceCore)
+import MLXInferenceCore
+#endif
+
 @MainActor
 final class MemoryPalaceService {
     static let shared = MemoryPalaceService()
@@ -133,6 +137,68 @@ final class MemoryPalaceService {
         
         return savedCount
     }
+    
+#if canImport(MLXInferenceCore)
+    public func synthesizePersonaIndex(wingName: String, using engine: InferenceEngine, onProgress: ((Int, Int, String) -> Void)? = nil) async throws {
+        onProgress?(1, 1, "EXTRACTING CORE IDENTITIES VIA VECTOR MATCHING...")
+        
+        // 1. Vector Search for critical identity aspects
+        let extractionCategories = [
+            ("Core Identity & Directives", "What is your core identity, main goal, or primary directive?"),
+            ("Background & Lore", "What is your origin story, historical background, and past experiences?"),
+            ("Tone & Speaking Style", "How do you speak? What is your tone of voice, cadence, and vocabulary?"),
+            ("Personality & Demeanor", "What is your personality like? Are you friendly, formal, eccentric, or stoic?"),
+            ("Preferences & Dislikes", "What are your personal preferences, likes, dislikes, and hobbies?")
+        ]
+        
+        var combinedContext = ""
+        var seenTexts = Set<String>()
+        
+        for (index, category) in extractionCategories.enumerated() {
+            onProgress?(index + 1, extractionCategories.count + 1, "EXTRACTING: \(category.0.uppercased())...")
+            
+            combinedContext += "\n[\(category.0) Results]\n"
+            let matches = try searchMemories(query: category.1, wingName: wingName, topK: 3)
+            var categoryHadMatches = false
+            
+            for match in matches {
+                if !seenTexts.contains(match.text) {
+                    seenTexts.insert(match.text)
+                    combinedContext += "- \(match.text)\n"
+                    categoryHadMatches = true
+                }
+            }
+            if !categoryHadMatches {
+                combinedContext += "(No direct matches found)\n"
+            }
+        }
+        
+        guard !combinedContext.isEmpty else {
+            print("[MemoryPalace] No memories found for persona synthesis.")
+            return
+        }
+        
+        // 2. Final Download (LLM Combine)
+        onProgress?(extractionCategories.count + 1, extractionCategories.count + 1, "SYNTHESIZING FINAL PERSONA (LLM)...")
+        let prompt = """
+        You are an analytical compiler. Consolidate the following extracted persona memories into a dense, 100-word core identity and talk-tone matrix. 
+        Do not output your reasoning or any conversational filler. Only output the final dense summary.
+        
+        [Vector-Matched Memories]
+        \(combinedContext)
+        """
+        
+        let stream = engine.generate(messages: [.user(prompt)])
+        var response = ""
+        for await token in stream {
+            response += token.text
+        }
+        
+        // 3. Save to Palace
+        try saveMemory(wingName: wingName, roomName: "persona_index", text: response.trimmingCharacters(in: .whitespacesAndNewlines), type: "hall_facts")
+        print("[MemoryPalace] 🧠 Vector-Driven Persona Index Generated & Saved.")
+    }
+#endif
     
     func searchMemories(query: String, wingName: String, roomName: String? = nil, hallType: String? = nil, topK: Int = 5) throws -> [MemoryEntry] {
         guard let context = modelContext else { throw URLError(.badServerResponse) }

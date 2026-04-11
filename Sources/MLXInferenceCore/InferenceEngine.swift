@@ -347,7 +347,6 @@ public final class InferenceEngine: ObservableObject {
         currentModelId = nil
         state = .idle
         ExpertStreamingConfig.shared.deactivate()
-        ExpertWeightCache.shared.clear()
         MLX.Memory.cacheLimit = 0
     }
 
@@ -372,11 +371,26 @@ public final class InferenceEngine: ObservableObject {
                 self.state = .generating
 
                 do {
-                    let mlxMessages = messages.map { 
-                        var roleString = $0.role.rawValue
-                        if roleString == "assistant" { roleString = "model" }
-                        return ["role": roleString, "content": $0.content] 
+                    var finalMessages: [[String: String]] = []
+                    var pendingSystemContext = ""
+                    
+                    for msg in messages {
+                        if msg.role == .system {
+                            pendingSystemContext += msg.content + "\n\n"
+                        } else {
+                            var roleRaw = msg.role.rawValue
+                            if roleRaw == "assistant" { roleRaw = "model" }
+                            var content = msg.content
+                            
+                            if roleRaw == "user" && !pendingSystemContext.isEmpty {
+                                content = "[SYSTEM CONTEXT / PERSONA DATA]\n" + pendingSystemContext + "\n[END CONTEXT]\n\n" + content
+                                pendingSystemContext = "" // Clear after injecting
+                            }
+                            finalMessages.append(["role": roleRaw, "content": content])
+                        }
                     }
+                    
+                    let mlxMessages = finalMessages
                     var params = GenerateParameters(temperature: config.temperature)
                     params.topP = config.topP
                     params.repetitionPenalty = config.repetitionPenalty

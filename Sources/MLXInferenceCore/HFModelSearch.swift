@@ -189,10 +189,62 @@ public final class HFModelSearchService: ObservableObject {
 
     // MARK: — Private
 
+    /// When the query looks like "owner/repo-name", fetch the model detail directly
+    /// from /api/models/{id} to bypass pipeline_tag and library filtering.
+    private func isDirectRepoQuery(_ query: String) -> Bool {
+        let parts = query.split(separator: "/")
+        return parts.count == 2 && !parts[0].isEmpty && !parts[1].isEmpty
+    }
+
+    private func fetchDirectRepo(_ modelId: String) async -> HFModelResult? {
+        let urlStr = "https://huggingface.co/api/models/\(modelId)"
+        guard let url = URL(string: urlStr) else { return nil }
+        do {
+            let (data, resp) = try await URLSession.shared.data(from: url)
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            struct Detail: Decodable {
+                let id: String
+                let likes: Int?
+                let downloads: Int?
+                let pipeline_tag: String?
+                let tags: [String]?
+                let usedStorage: Int64?
+            }
+            guard let detail = try? JSONDecoder().decode(Detail.self, from: data) else { return nil }
+            var result = HFModelResult(
+                id: detail.id,
+                likes: detail.likes,
+                downloads: detail.downloads,
+                pipeline_tag: detail.pipeline_tag,
+                tags: detail.tags
+            )
+            result.usedStorage = detail.usedStorage
+            return result
+        } catch { return nil }
+    }
+
     private func fetchPage() async {
         print("HFSearch: fetchPage started. Query: '\(currentQuery)' Sort: \(currentSort.rawValue)")
         isSearching = true
         errorMessage = nil
+
+        // ── Direct repo ID fast-path ──────────────────────────────────────
+        // If the query looks like "owner/model-name" skip search entirely
+        // and hit the model detail endpoint. This is needed because the HF
+        // search API filters on pipeline_tag which many MLX uploads don't match.
+        if isDirectRepoQuery(currentQuery) {
+            if let result = await fetchDirectRepo(currentQuery) {
+                results = [result]
+            } else {
+                // Also try with prefix variants (e.g. user typed partial name without quant suffix)
+                results = []
+                errorMessage = nil
+            }
+            isSearching = false
+            hasMore = false
+            print("HFSearch: fetchPage finished")
+            return
+        }
 
         var localResults: [HFModelResult] = []
         var tries = 0
@@ -211,10 +263,12 @@ public final class HFModelSearchService: ObservableObject {
 
                 var components = URLComponents(string: hfBase)!
                 var queryItems: [URLQueryItem] = [
-                    URLQueryItem(name: "pipeline_tag", value: "text-generation"),
-                    URLQueryItem(name: "sort",         value: currentSort.rawValue),
-                    URLQueryItem(name: "limit",        value: "\(pageSize)"),
-                    URLQueryItem(name: "full",         value: "false"),
+                    // NOTE: pipeline_tag intentionally omitted — many MLX uploads use
+                    // text2text-generation, feature-extraction, etc. Filtering by
+                    // pipeline_tag causes legitimate models to disappear from results.
+                    URLQueryItem(name: "sort",  value: currentSort.rawValue),
+                    URLQueryItem(name: "limit", value: "\(pageSize)"),
+                    URLQueryItem(name: "full",  value: "false"),
                 ]
                 if !finalQuery.isEmpty {
                     queryItems.append(URLQueryItem(name: "search", value: finalQuery))

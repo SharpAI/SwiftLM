@@ -1,0 +1,82 @@
+name: Performance Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_id:
+        description: 'HuggingFace Model ID (must be ungated and fit in 7GB RAM)'
+        required: true
+        default: 'mlx-community/gemma-4-e4b-it-4bit'
+      contexts:
+        description: 'Comma separated context lengths'
+        required: true
+        default: '512,1024,4096'
+      use_ssd_stream:
+        description: 'Enable SSD Expert Streaming'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  benchmark:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain || true
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-SwiftLM-v2-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-SwiftLM-v2-
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build (Release)
+        run: swift build -c release
+
+      - name: Install MLX Metal library & Profiling Dependencies
+        run: |
+          python3 -m venv /tmp/mlx_venv
+          /tmp/mlx_venv/bin/pip install --quiet mlx psutil requests
+          cp /tmp/mlx_venv/lib/python*/site-packages/mlx/lib/mlx.metallib .build/release/
+
+      - name: Cache MLX models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: mlx-benchmark-model-${{ github.event.inputs.model_id }}
+
+      - name: Run Benchmark Script
+        env:
+          HF_HUB_DOWNLOAD_TIMEOUT: "900"
+        run: |
+          EXTRA_FLAGS=""
+          if [ "${{ github.event.inputs.use_ssd_stream }}" = "true" ]; then
+            EXTRA_FLAGS="--ssd-only"
+            echo "Enabled SSD Streaming mode"
+          fi
+          
+          # Use the environment Python that has the pip dependencies
+          source /tmp/mlx_venv/bin/activate
+          
+          python3 -u scripts/profiling/profile_runner.py \
+            --model "${{ github.event.inputs.model_id }}" \
+            --contexts "${{ github.event.inputs.contexts }}" \
+            $EXTRA_FLAGS \
+            --out "./github-action-benchmark.md"
+
+      - name: Upload Benchmark Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: ./github-action-benchmark.md
+          retention-days: 7

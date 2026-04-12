@@ -1,13 +1,13 @@
 import XCTest
 import MLXInferenceCore
 @testable import MLXVLM
-import MLXLMCommon
+@preconcurrency import MLXLMCommon
 import CoreImage
 
 final class VLMProcessorTests: XCTestCase {
 
     // Feature 4: Reject request with no image when model requires one
-    func testVLM_RejectMissingImage() async throws {
+    nonisolated func testVLM_RejectMissingImage() async throws {
         // We know PaliGemmaProcessor throws if given no images
         let dummyTokenizer = MockTokenizer()
         
@@ -37,7 +37,7 @@ final class VLMProcessorTests: XCTestCase {
     }
     
     // Feature 5: Text-only fallback when VLM receives no image
-    func testVLM_TextOnlyFallback() async throws {
+    nonisolated func testVLM_TextOnlyFallback() async throws {
         // Qwen2VL natively supports text-only.
         let json = """
         {

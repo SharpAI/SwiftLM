@@ -2,7 +2,7 @@ import XCTest
 @testable import SwiftBuddy
 import MLXInferenceCore
 @testable import MLXVLM
-import MLXLMCommon
+@preconcurrency import MLXLMCommon
 
 struct MockTokenizer: MLXLMCommon.Tokenizer {
     func encode(text: String, addSpecialTokens: Bool) -> [Int] { return [] }
@@ -18,7 +18,7 @@ struct MockTokenizer: MLXLMCommon.Tokenizer {
 final class VLMRegistryTests: XCTestCase {
     
     // Feature 9: VLM model type registry covers all supported types
-    func testVLM_TypeRegistryCompleteness() async {
+    nonisolated func testVLM_TypeRegistryCompleteness() async {
         let expectedTypes: Set<String> = [
             "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe",
             "idefics3", "gemma3", "smolvlm", "fastvlm", "llava_qwen2", "pixtral",
@@ -41,7 +41,7 @@ final class VLMRegistryTests: XCTestCase {
     }
     
     // Feature 10: VLM processor registry covers all supported types
-    func testVLM_ProcessorRegistryCompleteness() async {
+    nonisolated func testVLM_ProcessorRegistryCompleteness() async {
         let expectedProcessors: Set<String> = [
             "PaliGemmaProcessor", "Qwen2VLProcessor", "Qwen2_5_VLProcessor", "Qwen3VLProcessor",
             "Idefics3Processor", "Gemma3Processor", "SmolVLMProcessor", "FastVLMProcessor",
@@ -65,7 +65,7 @@ final class VLMRegistryTests: XCTestCase {
     }
     
     // Feature 11: Unsupported model_type returns clear error
-    func testVLM_UnsupportedModelType() async {
+    nonisolated func testVLM_UnsupportedModelType() async {
         let registry = VLMTypeRegistry.shared
         do {
             let data = "{}".data(using: .utf8)!

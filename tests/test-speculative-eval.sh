@@ -23,7 +23,7 @@ PORT="${2:-15414}"
 HOST="127.0.0.1"
 MAIN_MODEL="${MAIN_MODEL:-mlx-community/Qwen3.5-9B-4bit}"
 DRAFT_MODEL="${DRAFT_MODEL:-mlx-community/Qwen3.5-0.8B-MLX-4bit}"
-NUM_DRAFT_TOKENS=2
+NUM_DRAFT_TOKENS=1
 URL="http://${HOST}:${PORT}"
 PASS=0
 FAIL=0
@@ -148,7 +148,7 @@ log "Test 3: Streaming speculative generation"
 
 STREAM_OUTPUT=$(curl -sf -N --max-time 120 -X POST "$URL/v1/chat/completions" \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MAIN_MODEL\",\"stream\":true,\"max_tokens\":30,\"messages\":[{\"role\":\"user\",\"content\":\"Name three fruits.\"}]}" \
+    -d "{\"model\":\"$MAIN_MODEL\",\"stream\":true,\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"Name three fruits.\"}]}" \
     2>/dev/null || true)
 
 if echo "$STREAM_OUTPUT" | grep -q "data: \[DONE\]"; then

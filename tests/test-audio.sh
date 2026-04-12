@@ -9,7 +9,7 @@ set -euo pipefail
 BINARY="${1:-.build/release/SwiftLM}"
 PORT="${2:-15413}"
 HOST="127.0.0.1"
-MODEL="mlx-community/gemma-4-2b-a4b-it-4bit" # CI Small ALM
+MODEL="mlx-community/gemma-4-e4b-it-4bit" # CI Small ALM (ungated, Any-to-Any)
 URL="http://${HOST}:${PORT}"
 PASS=0
 FAIL=0

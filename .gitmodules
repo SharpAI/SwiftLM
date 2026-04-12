@@ -4,6 +4,3 @@
 [submodule "mlx-swift-lm"]
 	path = mlx-swift-lm
 	url = https://github.com/SharpAI/mlx-swift-lm.git
-[submodule "swiftlm-landing"]
-	path = swiftlm-landing
-	url = https://github.com/SharpAI/swiftlm-landing.git

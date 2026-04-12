@@ -40,6 +40,18 @@ let package = Package(
             ],
             path: "Sources/SwiftLM"
         ),
+        // ── STFT Audio Profiling Testing Script (macOS only) ───────────
+        .executableTarget(
+            name: "SwiftLMTestSTFT",
+            dependencies: [
+                "MLXInferenceCore",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXVLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "Sources/SwiftLMTestSTFT"
+        ),
 
         // ── macOS GUI App (SwiftBuddy) ──────────────────────────────
         .executableTarget(

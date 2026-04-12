@@ -107,14 +107,22 @@ jobs:
           path: /tmp/SwiftLM-test-*.log
           retention-days: 7
 
-  # ── Speculative Decoding E2E (dual-model: 0.8B draft + 4B main) ──
-  # Uses the standard macos-15 runner (7 GB RAM). The combined 
-  # memory is ~4 GB. Tests the novel "small model helps large
-  # model" speculative decoding path from PR #26.
+  # ── Speculative Decoding E2E (dual-model matrix) ──
+  # Uses the standard macos-15 runner (7 GB RAM). 
+  # We test the 4B main model (expected to fit) and 9B main model 
+  # (expected to crash due to OOM) in parallel.
   speculative-decoding:
     runs-on: macos-15
     timeout-minutes: 45
     needs: ci  # Only run after core CI passes
+    strategy:
+      fail-fast: false
+      matrix:
+        main_model:
+          - "mlx-community/Qwen3.5-4B-4bit"
+          - "mlx-community/Qwen3.5-9B-4bit"
+    # The 9B will likely OOM on 7 GB ram, don't fail the whole action
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -155,6 +163,7 @@ jobs:
       - name: Run speculative decoding E2E
         env:
           HF_HUB_DOWNLOAD_TIMEOUT: "900"
+          MAIN_MODEL: ${{ matrix.main_model }}
         run: |
           chmod +x tests/test-speculative.sh
           for attempt in 1 2 3; do

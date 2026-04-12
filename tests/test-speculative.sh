@@ -21,8 +21,8 @@ set -euo pipefail
 BINARY="${1:-.build/release/SwiftLM}"
 PORT="${2:-15414}"
 HOST="127.0.0.1"
-MAIN_MODEL="mlx-community/Qwen3.5-4B-4bit"
-DRAFT_MODEL="mlx-community/Qwen3.5-0.8B-MLX-4bit"
+MAIN_MODEL="${MAIN_MODEL:-mlx-community/Qwen3.5-4B-4bit}"
+DRAFT_MODEL="${DRAFT_MODEL:-mlx-community/Qwen3.5-0.8B-MLX-4bit}"
 NUM_DRAFT_TOKENS=4
 URL="http://${HOST}:${PORT}"
 PASS=0
@@ -254,3 +254,8 @@ if [ "$FAIL" -gt 0 ]; then
     tail -20 "$LOG_FILE"
     exit 1
 fi
+
+echo ""
+log "Server log tail (last 20 lines):"
+tail -20 "$LOG_FILE"
+exit 0

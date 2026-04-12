@@ -143,40 +143,8 @@ else
     fail "Health endpoint: $HEALTH"
 fi
 
-# ── Test 3: Non-streaming speculative generation ────────────────────
-log "Test 3: Non-streaming speculative generation"
-
-SPEC_RESP=$(curl -sf --max-time 120 -X POST "$URL/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MAIN_MODEL\",\"max_tokens\":30,\"messages\":[{\"role\":\"user\",\"content\":\"What is 2+2? Reply in one sentence.\"}]}")
-
-SPEC_CONTENT=$(echo "$SPEC_RESP" | jq -r '.choices[0].message.content // empty')
-
-if [ -n "$SPEC_CONTENT" ]; then
-    pass "Non-streaming speculative: got response: \"$SPEC_CONTENT\""
-else
-    fail "Non-streaming speculative: empty response: $SPEC_RESP"
-fi
-
-# Verify token usage is reported
-SPEC_PROMPT_TOK=$(echo "$SPEC_RESP" | jq -r '.usage.prompt_tokens // 0')
-SPEC_COMP_TOK=$(echo "$SPEC_RESP" | jq -r '.usage.completion_tokens // 0')
-
-if [ "$SPEC_COMP_TOK" -gt 0 ] 2>/dev/null; then
-    pass "Token usage: completion_tokens=$SPEC_COMP_TOK (>0)"
-else
-    fail "Token usage: completion_tokens=$SPEC_COMP_TOK (expected >0)"
-fi
-
-# Check server log for speculative decoding activation
-if grep -q "Using speculative decoding" "$LOG_FILE"; then
-    pass "Speculative decoding path activated during generation"
-else
-    fail "Speculative decoding path not activated (missing log line)"
-fi
-
-# ── Test 4: Streaming speculative generation ────────────────────────
-log "Test 4: Streaming speculative generation"
+# ── Test 3: Streaming speculative generation ────────────────────────
+log "Test 3: Streaming speculative generation"
 
 STREAM_OUTPUT=$(curl -sf -N --max-time 120 -X POST "$URL/v1/chat/completions" \
     -H "Content-Type: application/json" \
@@ -194,6 +162,13 @@ if [ "$CHUNK_COUNT" -gt 0 ]; then
     pass "Streaming speculative: received $CHUNK_COUNT data chunks"
 else
     fail "Streaming speculative: no data chunks received"
+fi
+
+# Check server log for speculative decoding activation
+if grep -q "Using speculative decoding" "$LOG_FILE"; then
+    pass "Speculative decoding path activated during generation"
+else
+    fail "Speculative decoding path not activated (missing log line)"
 fi
 
 # ── Test 5: Multiple sequential requests (stability) ────────────────

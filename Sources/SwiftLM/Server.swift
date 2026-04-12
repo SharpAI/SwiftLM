@@ -260,6 +260,12 @@ struct MLXServer: AsyncParsableCommand {
     @Option(name: .long, help: "Chunk size for prefill evaluation (default: 512, lower to prevent GPU timeout on large models)")
     var prefillSize: Int = 512
 
+    @Option(name: .long, help: "Draft model for speculative decoding (local path or HuggingFace ID). Must share tokenizer with main model.")
+    var draftModel: String?
+
+    @Option(name: .long, help: "Number of draft tokens per speculation round (default: 4)")
+    var numDraftTokens: Int = 4
+
     mutating func run() async throws {
         print("[SwiftLM] Loading model: \(model)")
         let modelId = model
@@ -442,6 +448,39 @@ struct MLXServer: AsyncParsableCommand {
 
         print("[SwiftLM] Loaded model configuration. Inferred tool call format: \(String(describing: await container.configuration.toolCallFormat))")
 
+        // ── Load draft model for speculative decoding ──
+        let draftModelRef: DraftModelRef?
+        let numDraftTokensConfig = self.numDraftTokens
+        if let draftModelPath = self.draftModel {
+            print("[SwiftLM] Loading draft model for speculative decoding: \(draftModelPath)")
+            var draftConfig: ModelConfiguration
+            let draftFM = FileManager.default
+            if draftFM.fileExists(atPath: draftModelPath) {
+                var isDir: ObjCBool = false
+                draftFM.fileExists(atPath: draftModelPath, isDirectory: &isDir)
+                if isDir.boolValue {
+                    draftConfig = ModelConfiguration(directory: URL(filePath: draftModelPath))
+                } else {
+                    draftConfig = ModelConfiguration(id: draftModelPath)
+                }
+            } else {
+                draftConfig = ModelConfiguration(id: draftModelPath)
+            }
+            let draftDownloader = HubDownloader(hub: HubApi(downloadBase: cacheRoot))
+            let draftContainer = try await LLMModelFactory.shared.loadContainer(
+                from: draftDownloader,
+                using: TransformersTokenizerLoader(),
+                configuration: draftConfig
+            ) { progress in
+                // Silent loading for draft model
+            }
+            draftModelRef = await draftContainer.extractDraftModel()
+            print("[SwiftLM] Draft model loaded successfully (\(numDraftTokensConfig) tokens/round)")
+        } else {
+            draftModelRef = nil
+        }
+
+
         // ── Apply GPU/CPU layer partitioning ──
         if let gpuCount = requestedGPULayers {
             let actual = await container.setGPULayers(gpuCount)
@@ -608,7 +647,8 @@ struct MLXServer: AsyncParsableCommand {
             do {
                 let bodyData = try await collectBody(request)
                 return try await handleChatCompletion(
-                    bodyData: bodyData, config: config, container: container, semaphore: semaphore, stats: stats, promptCache: promptCache
+                    bodyData: bodyData, config: config, container: container, semaphore: semaphore, stats: stats, promptCache: promptCache,
+                    draftModelRef: draftModelRef, numDraftTokens: numDraftTokensConfig
                 )
             } catch {
                 let errMsg = String(describing: error).replacingOccurrences(of: "\"", with: "'")
@@ -969,7 +1009,9 @@ func handleChatCompletion(
     container: ModelContainer,
     semaphore: AsyncSemaphore,
     stats: ServerStats,
-    promptCache: PromptCache
+    promptCache: PromptCache,
+    draftModelRef: DraftModelRef? = nil,
+    numDraftTokens: Int = 4
 ) async throws -> Response {
     let chatReq = try JSONDecoder().decode(ChatCompletionRequest.self, from: bodyData)
     let isStream = chatReq.stream ?? false
@@ -1118,6 +1160,13 @@ func handleChatCompletion(
             let trimmedInput = LMInput(tokens: remainingTokens)
             stream = try MLXLMCommon.generate(
                 input: trimmedInput, cache: cache, parameters: params, context: context
+            )
+        } else if let draftRef = draftModelRef {
+            // Speculative decoding path: draft model generates candidates, main model verifies
+            print("[SwiftLM] Using speculative decoding (\(numDraftTokens) draft tokens/round)")
+            stream = try MLXLMCommon.generate(
+                input: lmInput, cache: cache, parameters: params, context: context,
+                draftModel: draftRef.model, numDraftTokens: numDraftTokens
             )
         } else {
             // Cache miss: process the full prompt.

@@ -52,6 +52,25 @@ The profiler will:
 - **Different contexts**: Change `--contexts` (comma-separated list of token counts)
 - **Output file**: Change `--out` path
 
+## Expert Top-K Tuning for MoE Models
+
+For Mixture of Expert (MoE) models (like `Qwen3.5-122B-A10B-4bit`), you can override the number of dynamically routed experts per token using the `SWIFTLM_TOP_K` environment variable. By default, SwiftLM evaluates the maximum number of experts defined by the model architecture. Reducing this trades marginal quality for extreme memory compression and streaming speed gains.
+
+Provide the parameter securely when running the profiler:
+```bash
+SWIFTLM_TOP_K=6 python3 -u scripts/profiling/profile_runner.py ...
+```
+
+### Reference Pipeline (M1 Ultra 64GB, Qwen3.5-122B-A10B-4bit)
+
+| Configuration | tok/s | vs. Original | Notes |
+|---|---|---|---|
+| Original `--stream-experts` | 0.58 | baseline | Sequential pread, 1 NVMe queue |
+| `SWIFTLM_TOP_K=8` | 4.95 | 8.5× | All 8 experts evaluated (Full quality) |
+| `SWIFTLM_TOP_K=6` | 5.20 | 9.0× | Recommended default |
+| `SWIFTLM_TOP_K=4` | 5.91 | 10.2× | Best quality/speed tradeoff (Speed mode) |
+| `SWIFTLM_TOP_K=2` | 6.52 | 11.2× | Still coherent output (Turbo mode) |
+
 ## After the Benchmark
 
 4. Review the generated markdown file and check for any `FAILED / OOM` entries.

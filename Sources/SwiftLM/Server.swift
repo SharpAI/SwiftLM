@@ -2108,8 +2108,19 @@ struct ChatCompletionRequest: Decodable {
             guard let content = content, case .parts(let parts) = content else { return [] }
             return parts.compactMap { part -> UserInput.Audio? in
                 guard part.type == "input_audio", let audio = part.inputAudio else { return nil }
-                if let data = Data(base64Encoded: audio.data) {
+                
+                // Be tolerant of optional data URI prefixes like "data:audio/wav;base64,"
+                var base64Str = audio.data
+                if base64Str.hasPrefix("data:") {
+                    if let commaIdx = base64Str.firstIndex(of: ",") {
+                        base64Str = String(base64Str[base64Str.index(after: commaIdx)...])
+                    }
+                }
+                
+                if let data = Data(base64Encoded: base64Str, options: .ignoreUnknownCharacters) {
                     return .data(data, format: audio.format)
+                } else {
+                    print("[Server] Fatal Base64 parse error for audio data!")
                 }
                 return nil
             }

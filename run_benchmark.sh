@@ -501,8 +501,9 @@ if [ "$suite_opt" == "6" ]; then
     curl -sL "https://images.unsplash.com/photo-1543466835-00a7907e9de1?auto=format&fit=crop&q=80&w=320" -o "$IMAGE_PATH"
     
     AUDIO_PATH="./tmp/omni_audio_test"
-    echo "Downloading real audio sample..."
-    curl -sL "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3" -o "${AUDIO_PATH}.mp3"
+    echo "Generating real audio sample via TTS..."
+    say "Warning! A dog has been detected on the security camera footage!" -o "${AUDIO_PATH}.aiff"
+    afconvert -f WAVE -d LEI16 "${AUDIO_PATH}.aiff" "${AUDIO_PATH}.wav"
     
     echo "Converting MP3 to WAV for engine pipeline ingestion..."
     # afconvert converts mp3 to standardized WAV under macOS natively without ffmpeg dependencies

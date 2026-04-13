@@ -2420,7 +2420,7 @@ public struct ALMUserInputProcessor: UserInputProcessor, @unchecked Sendable {
     public func prepare(input: UserInput) throws -> LMInput {
         let messages = messageGenerator.generate(from: input)
         do {
-            let promptTokensInt = try tokenizer.applyChatTemplate(
+            print("Messages:", messages); let promptTokensInt = try tokenizer.applyChatTemplate(
                 messages: messages, tools: input.tools, additionalContext: input.additionalContext)
             
             // Check if there is audio to interleave

@@ -3,6 +3,89 @@
 # Ensure we execute from the project root
 cd "$(dirname "$0")"
 
+generate_tts_wav() {
+    local text="$1"
+    local output_path="$2"
+    local temp_aiff
+    local sample_rate
+    local audio_bytes
+
+    temp_aiff=$(mktemp /tmp/swiftlm_tts.XXXXXX.aiff) || return 1
+
+    if ! say -v Samantha -r 150 -o "$temp_aiff" "$text"; then
+        rm -f "$temp_aiff"
+        return 1
+    fi
+
+    if ! afconvert -f WAVE -d LEI16@16000 "$temp_aiff" "$output_path" >/dev/null 2>&1; then
+        rm -f "$temp_aiff" "$output_path"
+        return 1
+    fi
+
+    rm -f "$temp_aiff"
+
+    sample_rate=$(
+        afinfo "$output_path" 2>/dev/null \
+            | sed -n 's/.*Data format:[[:space:]]*[0-9][0-9]* ch,[[:space:]]*\([0-9][0-9]*\) Hz.*/\1/p' \
+            | head -n 1
+    )
+    audio_bytes=$(
+        afinfo "$output_path" 2>/dev/null \
+            | sed -n 's/.*audio bytes:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+            | head -n 1
+    )
+
+    if [ "$sample_rate" != "16000" ] || [ -z "$audio_bytes" ] || [ "$audio_bytes" -le 0 ]; then
+        rm -f "$output_path"
+        return 1
+    fi
+}
+
+check_transcription_match() {
+    local actual_text="$1"
+    local expected_text="$2"
+    python3 - "$actual_text" "$expected_text" <<'PY'
+import difflib
+import re
+import sys
+
+actual = sys.argv[1]
+expected = sys.argv[2]
+
+def normalize(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r"<br\s*/?>", " ", text)
+    text = re.sub(r"[^a-z0-9']+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+actual_n = normalize(actual)
+expected_n = normalize(expected)
+
+actual_words = actual_n.split()
+expected_words = expected_n.split()
+expected_prefix_n = " ".join(expected_words[:len(actual_words)]).strip()
+
+full_ratio = difflib.SequenceMatcher(None, actual_n, expected_n).ratio()
+prefix_ratio = difflib.SequenceMatcher(None, actual_n, expected_prefix_n).ratio() if actual_n else 0.0
+prefix_exact = bool(actual_words) and actual_words == expected_words[:len(actual_words)]
+
+if actual_n == expected_n or prefix_exact or prefix_ratio >= 0.85 or full_ratio >= 0.90:
+    print("ok")
+else:
+    print(f"fail:{prefix_ratio:.3f}:{actual_n}:{expected_n}")
+PY
+}
+
+print_server_log() {
+    local log_path="$1"
+    if [ -f "$log_path" ]; then
+        cat "$log_path"
+    else
+        echo "No log found at $log_path"
+    fi
+}
+
 echo "=============================================="
 export METAL_LIBRARY_PATH="$(pwd)/.build/arm64-apple-macosx/release"
 echo "    Aegis-AI MLX Profiling Benchmark Suite    "
@@ -125,10 +208,10 @@ if [ "$suite_opt" == "4" ]; then
 elif [ "$suite_opt" == "5" ] || [ "$suite_opt" == "6" ]; then
     # NOTE: Only Gemma 4 e4b variants support audio (audio_config present).
     # gemma-4-26b-a4b has audio_config=null — no audio tower, always hallucinates 'no audio'.
+    # Qwen2-Audio is not exposed here because the current SwiftLM build does not support qwen2_audio.
     options=(
         "mlx-community/gemma-4-e4b-it-8bit"
         "mlx-community/gemma-4-e4b-it-4bit"
-        "mlx-community/Qwen2-Audio-7B-Instruct-4bit"
         "Custom (Enter your own Hub ID)"
         "Quit"
     )
@@ -179,6 +262,11 @@ else
     FULL_MODEL="$MODEL"
 fi
 
+if { [ "$suite_opt" == "5" ] || [ "$suite_opt" == "6" ]; } && [[ "$FULL_MODEL" == "mlx-community/Qwen2-Audio-7B-Instruct-4bit" ]]; then
+    echo "❌ ERROR: $FULL_MODEL is not supported by this SwiftLM build because model type 'qwen2_audio' is not implemented yet."
+    exit 1
+fi
+
 # Quick sanity check
 if [ -f ".build/arm64-apple-macosx/release/SwiftLM" ]; then
     BIN=".build/arm64-apple-macosx/release/SwiftLM"
@@ -205,7 +293,7 @@ if [ "$suite_opt" == "2" ]; then
     for i in {1..300}; do
         if ! kill -0 $SERVER_PID 2>/dev/null; then
             echo "❌ ERROR: Server process died unexpectedly! Printing logs:"
-            cat ./tmp/*_server.log || echo "No log found"
+            print_server_log ./tmp/regression_server.log
             exit 1
         fi
         if curl -s http://127.0.0.1:5431/health > /dev/null; then break; fi
@@ -247,7 +335,7 @@ if [ "$suite_opt" == "3" ]; then
     for i in {1..300}; do
         if ! kill -0 $SERVER_PID 2>/dev/null; then
             echo "❌ ERROR: Server process died unexpectedly! Printing logs:"
-            cat ./tmp/*_server.log || echo "No log found"
+            print_server_log ./tmp/homesec_server.log
             exit 1
         fi
         if curl -s http://127.0.0.1:5431/health > /dev/null; then break; fi
@@ -324,6 +412,7 @@ EOF
 
     echo "Starting Server in background with --vision..."
     killall SwiftLM 2>/dev/null
+    rm -f ./tmp/vlm_server.log
     $BIN --model "$FULL_MODEL" --vision --port 5431 > ./tmp/vlm_server.log 2>&1 &
     SERVER_PID=$!
     
@@ -331,7 +420,7 @@ EOF
     for i in {1..300}; do
         if ! kill -0 $SERVER_PID 2>/dev/null; then
             echo "❌ ERROR: Server process died unexpectedly! Printing logs:"
-            cat ./tmp/*_server.log || echo "No log found"
+            print_server_log ./tmp/vlm_server.log
             exit 1
         fi
         if curl -s http://127.0.0.1:5431/health > /dev/null; then break; fi
@@ -400,14 +489,18 @@ if [ "$suite_opt" == "5" ]; then
     
     mkdir -p tmp
     AUDIO_PATH="./tmp/audio_test"
-    # Generate a speech sample via macOS TTS for a proper transcription test.
-    # Using 'say' with Samantha voice at normal rate for a clean, reproducible payload.
-    say -v Samantha -r 150 --file-format=WAVE --data-format=LEI16@16000 \
-        "The quick brown fox jumps over the lazy dog. Machine learning systems require careful validation." \
-        -o "${AUDIO_PATH}.wav"
+    EXPECTED_TRANSCRIPT="The quick brown fox jumps over the lazy dog. Machine learning systems require careful validation."
+    # Generate speech via macOS TTS, then resample explicitly since `say`
+    # may still emit 22.05 kHz audio for some voices even when 16 kHz is requested.
+    if ! generate_tts_wav \
+        "$EXPECTED_TRANSCRIPT" \
+        "${AUDIO_PATH}.wav"; then
+        echo "Failed to generate a valid 16 kHz WAV test clip."
+        exit 1
+    fi
     
     if [ ! -f "${AUDIO_PATH}.wav" ]; then
-        echo "Failed to convert audio via afconvert."
+        echo "Failed to create benchmark audio."
         exit 1
     fi
     
@@ -419,6 +512,8 @@ if [ "$suite_opt" == "5" ]; then
 {
   "model": "$FULL_MODEL",
   "max_tokens": 500,
+  "temperature": 0,
+  "top_p": 1.0,
   "enable_thinking": false,
   "messages": [
     {
@@ -434,6 +529,7 @@ EOF
 
     echo "Starting Server in background with --audio..."
     killall SwiftLM 2>/dev/null
+    rm -f ./tmp/alm_server.log
     $BIN --model "$FULL_MODEL" --audio --port 5431 > ./tmp/alm_server.log 2>&1 &
     SERVER_PID=$!
     
@@ -441,7 +537,7 @@ EOF
     for i in {1..300}; do
         if ! kill -0 $SERVER_PID 2>/dev/null; then
             echo "❌ ERROR: Server process died unexpectedly! Printing logs:"
-            cat ./tmp/*_server.log || echo "No log found"
+            print_server_log ./tmp/alm_server.log
             exit 1
         fi
         if curl -s http://127.0.0.1:5431/health > /dev/null; then break; fi
@@ -474,6 +570,16 @@ else:
         exit 1
     fi
     echo -e "\n🎤 ALM Turn 1 Transcription:\n  → $ALM_RES\n"
+
+    ALM_CHECK=$(check_transcription_match "$ALM_RES" "$EXPECTED_TRANSCRIPT")
+    if [[ "$ALM_CHECK" != "ok" ]]; then
+        ALM_RATIO=$(echo "$ALM_CHECK" | cut -d: -f2)
+        echo "❌ ERROR: Turn 1 transcription did not match the expected audio closely enough."
+        echo "Expected: $EXPECTED_TRANSCRIPT"
+        echo "Observed: $ALM_RES"
+        echo "Similarity: ${ALM_RATIO:-unknown}"
+        exit 1
+    fi
     
     echo "Generating /tmp/alm_payload_2.json (Turn 2 - Closed Loop)..."
     ASSISTANT_CONTENT_ESCAPED=$(echo "$RAW_ALM_OUT" | python3 -c "import sys,json;print(json.dumps(json.load(sys.stdin).get('choices',[{}])[0].get('message',{}).get('content', 'ERROR')))")
@@ -482,6 +588,8 @@ else:
 {
   "model": "$FULL_MODEL",
   "max_tokens": 200,
+  "temperature": 0,
+  "top_p": 1.0,
   "enable_thinking": false,
   "messages": [
     {
@@ -542,8 +650,14 @@ if [ "$suite_opt" == "6" ]; then
     curl -sL "https://images.unsplash.com/photo-1543466835-00a7907e9de1?auto=format&fit=crop&q=80&w=320" -o "$IMAGE_PATH"
     
     AUDIO_PATH="./tmp/omni_audio_test"
+    EXPECTED_OMNI_TRANSCRIPT="Security alert. A brown and white dog has been detected on the camera. Please send assistance to the front gate immediately."
     echo "Generating real audio sample via TTS..."
-    say -v Samantha -r 150 --file-format=WAVE --data-format=LEI16@16000 "Warning! A dog has been detected on the security camera footage!" -o "${AUDIO_PATH}.wav"
+    if ! generate_tts_wav \
+        "$EXPECTED_OMNI_TRANSCRIPT" \
+        "${AUDIO_PATH}.wav"; then
+        echo "Failed to generate a valid 16 kHz WAV test clip."
+        exit 1
+    fi
     
 
     
@@ -561,13 +675,15 @@ if [ "$suite_opt" == "6" ]; then
 {
   "model": "$FULL_MODEL",
   "max_tokens": 400,
+  "temperature": 0,
+  "top_p": 1.0,
   "enable_thinking": false,
   "messages": [
     {
       "role": "user",
       "content": [
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,${BASE64_IMG}"}},
-        {"type": "text", "text": "First describe the image. Then provide a strict transcription of the audio clip."},
+        {"type": "text", "text": "First describe the image in one sentence. Then transcribe the spoken words from the audio clip verbatim. The audio clip is present and contains speech."},
         {"type": "input_audio", "input_audio": {"data": "${BASE64_AUDIO}", "format": "wav"}}
       ]
     }
@@ -577,6 +693,7 @@ EOF
 
     echo "Starting Server in background with --vision AND --audio (Omni)..."
     killall SwiftLM 2>/dev/null
+    rm -f ./tmp/omni_server.log
     $BIN --model "$FULL_MODEL" --vision --audio --port 5431 2>&1 | tee ./tmp/omni_server.log &
     SERVER_PID=$!
     
@@ -584,7 +701,7 @@ EOF
     for i in {1..300}; do
         if ! kill -0 $SERVER_PID 2>/dev/null; then
             echo "❌ ERROR: Server process died unexpectedly! Printing logs:"
-            cat ./tmp/*_server.log || echo "No log found"
+            print_server_log ./tmp/omni_server.log
             exit 1
         fi
         if curl -s http://127.0.0.1:5431/health > /dev/null; then break; fi
@@ -613,6 +730,51 @@ print(content.replace('\n', '<br/>'))
     fi
     
     echo -e "\n🤖 Omni Output: $OMNI_RES"
+
+    OMNI_AUDIO_CHECK=$(echo "$RAW_OMNI_OUT" | python3 -c "
+import sys, json, re
+d = json.load(sys.stdin)
+content = d.get('choices',[{}])[0].get('message',{}).get('content', '')
+content = re.sub(r'<\|channel\|>thought.*?<channel\|>', '', content, flags=re.DOTALL).strip().lower()
+bad_markers = [
+    'no audio clip provided',
+    'no audio provided',
+    'there is no audio',
+    'audio clip is provided',
+]
+print('fail' if any(marker in content for marker in bad_markers) else 'ok')
+")
+    if [ "$OMNI_AUDIO_CHECK" != "ok" ]; then
+        echo "❌ ERROR: Omni response ignored the supplied audio clip."
+        echo "Cleaning up..."
+        killall SwiftLM
+        wait $SERVER_PID 2>/dev/null
+        rm -f /tmp/omni_payload.json "$IMAGE_PATH" "${AUDIO_PATH}.wav"
+        exit 1
+    fi
+
+    OMNI_TRANSCRIPT_CHECK=$(echo "$RAW_OMNI_OUT" | python3 -c "
+import json, re, sys
+d = json.load(sys.stdin)
+content = d.get('choices',[{}])[0].get('message',{}).get('content', '')
+content = re.sub(r'<\|channel\|>thought.*?<channel\|>', '', content, flags=re.DOTALL).strip()
+# Split on any newline (model may use \n or \n\n between image-desc / audio-transcript paragraphs)
+parts = [part.strip() for part in re.split(r'\n+', content) if part.strip()]
+print(parts[-1] if parts else content)
+")
+    OMNI_MATCH=$(check_transcription_match "$OMNI_TRANSCRIPT_CHECK" "$EXPECTED_OMNI_TRANSCRIPT")
+    if [[ "$OMNI_MATCH" != "ok" ]]; then
+        OMNI_RATIO=$(echo "$OMNI_MATCH" | cut -d: -f2)
+        echo "❌ ERROR: Omni transcription did not match the expected audio closely enough."
+        echo "Expected: $EXPECTED_OMNI_TRANSCRIPT"
+        echo "Observed: $OMNI_TRANSCRIPT_CHECK"
+        echo "Similarity: ${OMNI_RATIO:-unknown}"
+        echo "Cleaning up..."
+        killall SwiftLM
+        wait $SERVER_PID 2>/dev/null
+        rm -f /tmp/omni_payload.json "$IMAGE_PATH" "${AUDIO_PATH}.wav"
+        exit 1
+    fi
     
     if [ "$HEADLESS" != "1" ]; then
         UI_FILE="/tmp/swiftlm_omni_result.html"

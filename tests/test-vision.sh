@@ -59,8 +59,8 @@ fi
 
 # ── Test VLM ──────────────────────────────────────────────────────────
 mkdir -p /tmp/vision_test
-# 1x1 black PNG
-BASE64_IMG="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+# 28x28 black PNG (requires multiple of 28 for Qwen2-VL patch embedder)
+BASE64_IMG="iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAIAAAD9b0jDAAAAGUlEQVR4nO3BMQEAAADCoPVPbQdvoAAA6DQJTAABRMAOLAAAAABJRU5ErkJggg=="
 
 COMPLETION=$(curl -sf -X POST "$URL/v1/chat/completions" \
     -H "Content-Type: application/json" \

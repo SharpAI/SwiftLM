@@ -74,8 +74,8 @@ EOF
 python3 /tmp/omni_test/gen.py
 BASE64_AUDIO=$(base64 -i /tmp/omni_test/test.wav | tr -d '\n')
 
-# Hardcoded 1x1 black PNG
-BASE64_IMG="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+# 28x28 black PNG (requires multiple of 28 for Qwen2-VL patch embedder)
+BASE64_IMG="iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAIAAAD9b0jDAAAAGUlEQVR4nO3BMQEAAADCoPVPbQdvoAAA6DQJTAABRMAOLAAAAABJRU5ErkJggg=="
 
 # Payload with both audio and image
 cat <<EOF > /tmp/omni_test/payload.json

@@ -123,10 +123,11 @@ if [ "$suite_opt" == "4" ]; then
         "Quit"
     )
 elif [ "$suite_opt" == "5" ] || [ "$suite_opt" == "6" ]; then
+    # NOTE: Only Gemma 4 e4b variants support audio (audio_config present).
+    # gemma-4-26b-a4b has audio_config=null — no audio tower, always hallucinates 'no audio'.
     options=(
         "mlx-community/gemma-4-e4b-it-8bit"
         "mlx-community/gemma-4-e4b-it-4bit"
-        "mlx-community/gemma-4-26b-a4b-it-4bit"
         "mlx-community/Qwen2-Audio-7B-Instruct-4bit"
         "Custom (Enter your own Hub ID)"
         "Quit"
@@ -542,8 +543,7 @@ if [ "$suite_opt" == "6" ]; then
     
     AUDIO_PATH="./tmp/omni_audio_test"
     echo "Generating real audio sample via TTS..."
-    say "Warning! A dog has been detected on the security camera footage!" -o "${AUDIO_PATH}.aiff"
-    afconvert -f WAVE -d LEI16@16000 "${AUDIO_PATH}.aiff" "${AUDIO_PATH}.wav"
+    say -v Samantha -r 150 --file-format=WAVE --data-format=LEI16@16000 "Warning! A dog has been detected on the security camera footage!" -o "${AUDIO_PATH}.wav"
     
 
     
@@ -561,12 +561,13 @@ if [ "$suite_opt" == "6" ]; then
 {
   "model": "$FULL_MODEL",
   "max_tokens": 400,
+  "enable_thinking": false,
   "messages": [
     {
       "role": "user",
       "content": [
-        {"type": "text", "text": "First describe what you see in the image. Then transcribe exactly what you hear in the audio."},
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,${BASE64_IMG}"}},
+        {"type": "text", "text": "First describe the image. Then provide a strict transcription of the audio clip."},
         {"type": "input_audio", "input_audio": {"data": "${BASE64_AUDIO}", "format": "wav"}}
       ]
     }
@@ -598,7 +599,14 @@ EOF
         echo "❌ ERROR: Server dropped the connection or crashed!"
         exit 1
     fi
-    OMNI_RES=$(echo "$RAW_OMNI_OUT" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('choices',[{}])[0].get('message',{}).get('content', 'ERROR').replace('\n', '<br/>'))")
+    # Extract content and strip any thinking blocks
+    OMNI_RES=$(echo "$RAW_OMNI_OUT" | python3 -c "
+import sys, json, re
+d = json.load(sys.stdin)
+content = d.get('choices',[{}])[0].get('message',{}).get('content', 'ERROR')
+content = re.sub(r'<\|channel\|>thought.*?<channel\|>', '', content, flags=re.DOTALL).strip()
+print(content.replace('\n', '<br/>'))
+")
     if [ -z "$OMNI_RES" ] || [[ "$OMNI_RES" == *"ERROR"* ]]; then
         echo "❌ ERROR: JSON Decode failed!"
         exit 1

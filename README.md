@@ -232,6 +232,18 @@ SwiftLM --port 8002 \
 
 ---
 
+## 🔀 Why We Forked Apple MLX
+
+To achieve the extreme memory efficiency and speeds seen in **SSD Expert Streaming** and **Speculative Decoding**, `SwiftLM` relies on custom C++ primitives that bypass standard unified memory limits.
+
+> [!NOTE]
+> We maintain custom forks (`SharpAI/mlx` and `SharpAI/mlx-c`) to support **out-of-core memory-mapped execution**, streaming tensor blocks directly from the SSD (NVMe) to the GPU via custom Metal kernels (`ssd_streamer.mm` and `fence.air`). Official `ml-explore` repositories do not yet support this out-of-the-box.
+
+For a detailed breakdown on repository architecture, upstream synchronization, our specific custom patches, and the specific indications for when we can safely revert to Apple's native upstream, read the full documentation: 
+👉 **[Upstream MLX Synchronization & SSD Streaming Maintenance](.agents/workflows/mlx-upstream-sync.md)**
+
+---
+
 ## 💻 Benchmarks & Testing
 
 Run our automated benchmark suites via the interactive script:

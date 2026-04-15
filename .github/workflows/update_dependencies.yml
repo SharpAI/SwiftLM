@@ -48,4 +48,4 @@ jobs:
             
             This PR ensures SwiftLM is tracking the latest validated architectural improvements.
           branch: "auto-update/${{ github.event.client_payload.source_repo }}-${{ github.event.client_payload.new_tag }}"
-          base: feature/swiftbuddy-mempalace-v1
+          base: main

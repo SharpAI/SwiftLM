@@ -755,6 +755,21 @@ else
 fi
 
 
+# ── Test 24.5: top_k and min_p per-request override ──────────────────────
+log "Test 24.5: top_k and min_p per-request override"
+
+TOP_MIN_RESP=$(curl -sf -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MODEL\",\"max_tokens\":10,\"top_k\":40,\"min_p\":0.05,\"messages\":[{\"role\":\"user\",\"content\":\"Say hi.\"}]}")
+
+if echo "$TOP_MIN_RESP" | jq -e '.choices[0].message.content' >/dev/null 2>&1; then
+    CONTENT=$(echo "$TOP_MIN_RESP" | jq -r '.choices[0].message.content')
+    pass "top_k and min_p override: got response: \"$CONTENT\""
+else
+    fail "top_k and min_p override: empty response with top_k=40 and min_p=0.05"
+fi
+
+
 # ── Test 25: Concurrent requests (parallel slot limiter) ─────────────
 log "Test 25: Concurrent requests (2 in parallel)"
 

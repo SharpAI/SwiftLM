@@ -350,6 +350,9 @@ curl http://localhost:5413/v1/chat/completions \
 | `--audio` | `false` | Enable ALM (audio-language model) mode for audio inputs |
 | `--max-tokens` | `2048` | Max tokens limit per generation |
 | `--prefill-size`| `512`  | Prompt prefill chunk size (micro-batching for long contexts) |
+| `--top-p` | `1.0` | Default top-p nucleus sampling (overridable per-request) |
+| `--top-k` | `50` | Default top-k sampling (0 disables, overridable per-request) |
+| `--min-p` | `0.0` | Default min-p sampling threshold relative to the highest probability token (0 disables) |
 | `--gpu-layers` | `model_default`| Restrict the amount of layers allocated to GPU hardware |
 | `--stream-experts` | `false` | Enable SSD expert streaming for MoE models (10x speedup) |
 | `--turbo-kv` | `false` | Enable TurboQuant 3-bit KV cache compression |

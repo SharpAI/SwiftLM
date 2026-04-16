@@ -15,6 +15,18 @@ struct MockTokenizer: MLXLMCommon.Tokenizer {
     func applyChatTemplate(messages: [[String: any Sendable]], tools: [[String: any Sendable]]?, additionalContext: [String: any Sendable]?) throws -> [Int] { return [] }
 }
 
+extension ModelTypeRegistry {
+    func testCreateModel(configuration: Data, modelType: String) throws {
+        _ = try self.createModel(configuration: configuration, modelType: modelType)
+    }
+}
+
+extension ProcessorTypeRegistry {
+    func testCreateModel(configuration: Data, processorType: String, tokenizer: any Tokenizer) throws {
+        _ = try self.createModel(configuration: configuration, processorType: processorType, tokenizer: tokenizer)
+    }
+}
+
 final class VLMRegistryTests: XCTestCase {
     
     // Feature 9: VLM model type registry covers all supported types
@@ -30,7 +42,7 @@ final class VLMRegistryTests: XCTestCase {
         
         for type in expectedTypes {
             do {
-                _ = try await registry.createModel(configuration: dummyData, modelType: type)
+                try await registry.testCreateModel(configuration: dummyData, modelType: type)
                 // If it succeeds with dummy data, that's fine, it means the registry works.
             } catch let ModelFactoryError.unsupportedModelType(t) {
                 XCTFail("Registry is missing supported model type: \(t)")
@@ -54,7 +66,7 @@ final class VLMRegistryTests: XCTestCase {
         
         for type in expectedProcessors {
             do {
-                _ = try await registry.createModel(configuration: dummyData, processorType: type, tokenizer: dummyTokenizer)
+                try await registry.testCreateModel(configuration: dummyData, processorType: type, tokenizer: dummyTokenizer)
                 // If it succeeds with dummy data, that's fine, it means the registry works and the config was optional.
             } catch let ModelFactoryError.unsupportedModelType(t) {
                 XCTFail("Registry is missing supported processor type: \(t)")
@@ -69,7 +81,7 @@ final class VLMRegistryTests: XCTestCase {
         let registry = VLMTypeRegistry.shared
         do {
             let data = "{}".data(using: .utf8)!
-            _ = try await registry.createModel(configuration: data, modelType: "nonexistent_model")
+            try await registry.testCreateModel(configuration: data, modelType: "nonexistent_model")
             XCTFail("Should have thrown error")
         } catch ModelFactoryError.unsupportedModelType(let type) {
             XCTAssertEqual(type, "nonexistent_model")

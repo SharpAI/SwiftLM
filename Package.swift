@@ -50,7 +50,8 @@ let package = Package(
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
-            path: "Sources/SwiftLMTestSTFT"
+            path: "Sources/SwiftLMTestSTFT",
+            exclude: ["ground_truth.py"]
         ),
 
         // ── macOS GUI App (SwiftBuddy) ──────────────────────────────

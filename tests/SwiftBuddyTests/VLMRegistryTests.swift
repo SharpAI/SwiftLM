@@ -32,7 +32,7 @@ final class VLMRegistryTests: XCTestCase {
     // Feature 9: VLM model type registry covers all supported types
     nonisolated func testVLM_TypeRegistryCompleteness() async {
         let expectedTypes: Set<String> = [
-            "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl",
+            "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe",
             "idefics3", "gemma3", "smolvlm", "fastvlm", "llava_qwen2", "pixtral",
             "mistral3", "lfm2_vl", "lfm2-vl", "glm_ocr"
         ]

@@ -12,17 +12,6 @@ final class VLMTests: XCTestCase {
         XCTAssertTrue(found, "Output should indicate VLM is loading. Got: \(accumulated)")
     }
 
-    func testVLM_AutoDetectsLFM25WithoutVisionFlag() async throws {
-        let accumulated = try await captureStartupOutput(arguments: [
-            "--model", "LiquidAI/LFM2.5-VL-450M-MLX-4bit",
-        ], timeout: 20.0)
-
-        XCTAssertTrue(
-            accumulated.contains("Auto-detected VLM config")
-                || accumulated.contains("Loading VLM"),
-            "Output should indicate VLM auto-detection/loading. Got: \(accumulated)"
-        )
-    }
 
     private func captureStartupOutput(
         arguments: [String],

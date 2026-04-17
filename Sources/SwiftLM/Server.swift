@@ -405,7 +405,7 @@ struct MLXServer: AsyncParsableCommand {
             configuration: modelConfig,
             downloader: downloader
         )
-        let isVision = self.vision || (!self.audio && architecture.supportsVision)
+        let isVision = self.vision
         let container: ModelContainer
         
         // Handle getting the simple model ID string for the tracker
@@ -416,9 +416,6 @@ struct MLXServer: AsyncParsableCommand {
         let tracker = ProgressTracker(modelId: resolvedModelId)
         
         let isAudio = self.audio
-        if architecture.supportsVision && !self.vision && !self.audio {
-            print("[SwiftLM] Auto-detected VLM config (\(architecture.modelType ?? "unknown")); enabling vision mode.")
-        }
         if isVision && isAudio {
             print("[SwiftLM] Loading Omni-Language Model (Text + Vision + Audio)...")
             container = try await OmniModelFactory.shared.loadContainer(

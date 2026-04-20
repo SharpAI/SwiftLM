@@ -1,6 +1,8 @@
 #!/bin/bash
 set -eo pipefail
 
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 echo "=============================================="
 echo "    SwiftLM Build Script                      "
 echo "=============================================="

@@ -1368,7 +1368,7 @@ struct ThinkingStateTracker {
 /// Tracks prefill progress: whether it is done, and how many tokens have been processed.
 /// n_past is updated by activePrefillProgressHook (called from LLMModel.prepare after each chunk)
 /// and read by the SSE heartbeat task every 2 s.
-private actor PrefillState {
+actor PrefillState {
     private(set) var done: Bool = false
     private(set) var nPast: Int = 0
     func finish() { done = true }
@@ -1393,18 +1393,25 @@ func handleChatStreaming(
     let (sseStream, cont) = AsyncStream<String>.makeStream()
 
     let prefillState = PrefillState()
+    // ── Prefill heartbeat (opt-in via X-SwiftLM-Prefill-Progress: true) ──
+    // We capture the hook in a local variable so that concurrent requests
+    // cannot clobber each other's hook via the global. The global is still
+    // written here because LLMModel.prepare() reads it, but the semaphore
+    // ensures only one generation runs at a time.
+    var heartbeatTask: Task<Void, Never>? = nil
     activePrefillProgressHook = nil
     if emitPrefillProgress {
-        // ── Optional prefill heartbeat: emit a named SSE event every 2 s ──
-        // n_past is updated by activePrefillProgressHook in LLMModel.prepare() after each
-        // 512-token chunk; single-chunk prompts only show elapsed_seconds.
+        // Hook is scoped to this request: the local prefillState is the only
+        // shared state, and it is actor-isolated.
         activePrefillProgressHook = { nPast, _ in
             Task { await prefillState.update(nPast: nPast) }
         }
-        Task {
+        heartbeatTask = Task {
             var elapsed = 0
             while await !prefillState.done {
                 try? await Task.sleep(for: .seconds(2))
+                // Guard against Task cancellation on client disconnect.
+                guard !Task.isCancelled else { break }
                 if await !prefillState.done {
                     elapsed += 2
                     let nPast = await prefillState.nPast
@@ -1442,7 +1449,9 @@ func handleChatStreaming(
                 }
                 // Signal first token — stops the prefill heartbeat task
                 if firstToken {
-                    // First decode token: stop heartbeat and clear the prefill progress hook
+                    // First decode token: cancel heartbeat and clear the prefill progress hook.
+                    heartbeatTask?.cancel()
+                    heartbeatTask = nil
                     activePrefillProgressHook = nil
                     await prefillState.finish()
                     let prefillDur = Date().timeIntervalSince(prefillStart)
@@ -1532,6 +1541,8 @@ func handleChatStreaming(
                 toolCallIndex += 1
 
             case .info(let info):
+                heartbeatTask?.cancel()
+                heartbeatTask = nil
                 activePrefillProgressHook = nil
                 await prefillState.finish()
                 if !stopped {
@@ -1816,15 +1827,17 @@ func handleTextStreaming(
 ) -> Response {
     let (sseStream, cont) = AsyncStream<String>.makeStream()
     let prefillState = PrefillState()
+    var heartbeatTask: Task<Void, Never>? = nil
     activePrefillProgressHook = nil
     if emitPrefillProgress {
         activePrefillProgressHook = { nPast, _ in
             Task { await prefillState.update(nPast: nPast) }
         }
-        Task {
+        heartbeatTask = Task {
             var elapsed = 0
             while await !prefillState.done {
                 try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { break }
                 if await !prefillState.done {
                     elapsed += 2
                     let nPast = await prefillState.nPast
@@ -1846,6 +1859,8 @@ func handleTextStreaming(
             switch generation {
             case .chunk(let text, _):
                 if firstToken {
+                    heartbeatTask?.cancel()
+                    heartbeatTask = nil
                     activePrefillProgressHook = nil
                     await prefillState.finish()
                     firstToken = false
@@ -1872,6 +1887,8 @@ func handleTextStreaming(
             case .toolCall:
                 break
             case .info(let info):
+                heartbeatTask?.cancel()
+                heartbeatTask = nil
                 activePrefillProgressHook = nil
                 await prefillState.finish()
                 if !stopped {
@@ -2132,12 +2149,15 @@ func sseChunk(modelId: String, reasoningContent: String?, content: String?, fini
 
 /// Prefill-progress heartbeat chunk — emitted every 2s while the server is processing the prompt
 /// when explicitly enabled via `X-SwiftLM-Prefill-Progress: true`.
-/// It is sent as a named SSE event to avoid breaking strict OpenAI-compatible clients.
+/// It is sent as a named SSE event (`event: prefill_progress`) to avoid breaking strict
+/// OpenAI-compatible clients (e.g. OpenCode), which reject unknown `data:` objects.
 /// Format mirrors llama-server's slot_update event:
 ///   n_past          : tokens evaluated so far (real value from chunked prefill, or 0 for single-chunk)
 ///   n_prompt_tokens : total prompt token count
 ///   fraction        : n_past / n_prompt_tokens (0.0–1.0), useful for progress bars
 ///   elapsed_seconds : wall-clock time since the request started
+/// Note: `model` is intentionally omitted — clients can correlate from preceding stream chunks.
+/// Note: `on` is accepted as a truthy header value for parity with common reverse proxy conventions.
 func ssePrefillChunk(nPast: Int = 0, promptTokens: Int, elapsedSeconds: Int) -> String {
     let fraction = promptTokens > 0 ? Double(nPast) / Double(promptTokens) : 0.0
     let chunk: [String: Any] = [

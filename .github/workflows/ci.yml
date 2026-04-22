@@ -62,6 +62,9 @@ jobs:
       - name: SwiftBuddy Tests (MemPalace & Lifecycle)
         run: swift test --skip-build --filter SwiftBuddyTests --disable-swift-testing
 
+      - name: SwiftLM Server Tests (Streaming & SSE)
+        run: swift test --skip-build --filter SwiftLMTests --disable-swift-testing
+
       - name: Upload Binary Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -73,10 +76,11 @@ jobs:
     needs: build_and_unit_test
     runs-on: macos-15
     timeout-minutes: 30
+    continue-on-error: ${{ matrix.modality == 'opencode' }}
     strategy:
       fail-fast: false
       matrix:
-        modality: [server, vision, audio, graph, omni]
+        modality: [server, vision, audio, graph, omni, opencode]
     steps:
       - uses: actions/checkout@v4
         with:

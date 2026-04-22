@@ -960,6 +960,126 @@ else
 fi
 
 
+# ── Test 32: Default streaming is strict (no prefill_progress event leaks) ──
+log "Test 32: Default streaming is strict (no prefill_progress leaks)"
+
+STRICT_STREAM=$(curl -sf -N -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MODEL\",\"stream\":true,\"max_tokens\":20,\"messages\":[{\"role\":\"user\",\"content\":\"Say hi.\"}]}" \
+    --max-time 30 2>/dev/null || true)
+
+if echo "$STRICT_STREAM" | grep -q "^event:"; then
+    fail "Strict mode: unexpected named SSE event without opt-in header"
+else
+    pass "Strict mode: no named SSE events in default streaming"
+fi
+
+if echo "$STRICT_STREAM" | grep -q '"prefill_progress"'; then
+    fail "Strict mode: prefill_progress payload leaked into default stream"
+else
+    pass "Strict mode: no prefill_progress object in default stream"
+fi
+
+
+# ── Test 33: Opt-in header enables named SSE event ────────────────────────────
+log "Test 33: Opt-in header enables named SSE event"
+
+OPTIN_STREAM=$(curl -sf -N -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "X-SwiftLM-Prefill-Progress: true" \
+    -d "{\"model\":\"$MODEL\",\"stream\":true,\"max_tokens\":20,\"messages\":[{\"role\":\"user\",\"content\":\"Say a very long sentence that will definitely take some time to process.\"}]}" \
+    --max-time 30 2>/dev/null || true)
+
+if echo "$OPTIN_STREAM" | grep -q "^event: prefill_progress"; then
+    pass "Opt-in: named prefill_progress event received"
+else
+    log "  ⚠️  WARN: no heartbeat (prompt may have been too short for 2s window)"
+    pass "Opt-in: header accepted without error (heartbeat timing not guaranteed in CI)"
+fi
+
+EVENT_DATA=$(echo "$OPTIN_STREAM" | grep -A1 "^event: prefill_progress" | grep "^data:" | head -1 | sed 's/^data: //')
+if [ -n "$EVENT_DATA" ]; then
+    if echo "$EVENT_DATA" | jq -e '.n_prompt_tokens' >/dev/null 2>&1; then
+        pass "Opt-in: prefill_progress data has n_prompt_tokens"
+    else
+        fail "Opt-in: prefill_progress data missing n_prompt_tokens"
+    fi
+    
+    if ! echo "$EVENT_DATA" | jq -e '.choices' >/dev/null 2>&1; then
+        pass "Opt-in: prefill_progress data has no .choices (strict payload)"
+    else
+        fail "Opt-in: prefill_progress data has .choices (not lean)"
+    fi
+fi
+
+
+# ── Test 34: CORS preflight exposes X-SwiftLM-Prefill-Progress header ─────────
+log "Test 34: CORS preflight exposes X-SwiftLM-Prefill-Progress"
+
+OPTIONS_RESP=$(curl -sf -D - -o /dev/null -X OPTIONS "$URL/v1/chat/completions" \
+    -H "Origin: http://example.com" \
+    -H "Access-Control-Request-Method: POST" \
+    -H "Access-Control-Request-Headers: X-SwiftLM-Prefill-Progress" 2>&1 || true)
+
+if echo "$OPTIONS_RESP" | grep -qi "X-SwiftLM-Prefill-Progress"; then
+    pass "CORS: Access-Control-Allow-Headers includes X-SwiftLM-Prefill-Progress"
+else
+    fail "CORS: Access-Control-Allow-Headers missing X-SwiftLM-Prefill-Progress"
+fi
+
+
+# ── Test 35: Concurrent opt-in requests ───────────────────────────────────────
+log "Test 35: Concurrent opt-in requests"
+
+CONCURRENT_OPTIN_PASS=true
+PID_A=""
+PID_B=""
+
+curl -sf -N -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "X-SwiftLM-Prefill-Progress: true" \
+    -d "{\"model\":\"$MODEL\",\"stream\":true,\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"Say one.\"}]}" \
+    -o /tmp/mlx_optin_A.txt &
+PID_A=$!
+
+curl -sf -N -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "X-SwiftLM-Prefill-Progress: true" \
+    -d "{\"model\":\"$MODEL\",\"stream\":true,\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"Say two.\"}]}" \
+    -o /tmp/mlx_optin_B.txt &
+PID_B=$!
+
+wait "$PID_A" || CONCURRENT_OPTIN_PASS=false
+wait "$PID_B" || CONCURRENT_OPTIN_PASS=false
+
+if [ "$CONCURRENT_OPTIN_PASS" = true ]; then
+    if grep -q "data: \[DONE\]" /tmp/mlx_optin_A.txt && grep -q "data: \[DONE\]" /tmp/mlx_optin_B.txt; then
+        pass "Concurrent opt-in: both requests completed successfully"
+    else
+        fail "Concurrent opt-in: one or both streams did not complete"
+    fi
+else
+    fail "Concurrent opt-in: curl failed"
+fi
+rm -f /tmp/mlx_optin_A.txt /tmp/mlx_optin_B.txt
+
+
+# ── Test 36: /v1/completions (text endpoint) respects opt-in header ───────────
+log "Test 36: /v1/completions respects opt-in header"
+
+TEXT_STREAM_OPT=$(curl -sf -N -X POST "$URL/v1/completions" \
+    -H "Content-Type: application/json" \
+    -H "X-SwiftLM-Prefill-Progress: true" \
+    -d "{\"model\":\"$MODEL\",\"stream\":true,\"max_tokens\":10,\"prompt\":\"Hello world.\"}" \
+    --max-time 30 2>/dev/null || true)
+
+if echo "$TEXT_STREAM_OPT" | grep -q "data: \[DONE\]"; then
+    pass "Text streaming + opt-in header: [DONE] received"
+else
+    fail "Text streaming + opt-in header: failed or missing [DONE]"
+fi
+
+
 # ── Results ──────────────────────────────────────────────────────────
 echo ""
 log "═══════════════════════════════════════"

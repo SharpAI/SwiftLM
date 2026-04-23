@@ -140,7 +140,7 @@ if [ "$suite_opt" == "q" ] || [ -z "$suite_opt" ]; then
     exit 0
 fi
 
-if [ "$suite_opt" == "9" ] || [ "$suite_opt" == "8" ] || [ "$suite_opt" == "10" ] || [ "$suite_opt" == "11" ] || [ "$suite_opt" == "12" ]; then
+if [ "$suite_opt" == "9" ] || [ "$suite_opt" == "8" ] || [ "$suite_opt" == "10" ]; then
     : # handled below — fall through
 fi
 
@@ -195,6 +195,24 @@ if [ "$suite_opt" == "7" ]; then
             exit 0
         fi
     done
+fi
+
+if [ "$suite_opt" == "11" ]; then
+    echo ""
+    echo "=> Starting Test 11: DFlash Benchmark (Qwen3-Coder-Next-4bit)"
+    export MODEL="mlx-community/Qwen3-Coder-Next-4bit"
+    chmod +x bench_coder_next.sh
+    ./bench_coder_next.sh
+    exit $?
+fi
+
+if [ "$suite_opt" == "12" ]; then
+    echo ""
+    echo "=> Starting Test 12: DFlash Benchmark (Qwen3.6-35B-A3B-4bit)"
+    export MODEL="mlx-community/Qwen3.6-35B-A3B-4bit"
+    chmod +x bench_35b.sh
+    ./bench_35b.sh
+    exit $?
 fi
 
 echo ""
@@ -1312,22 +1330,6 @@ if [ "$suite_opt" == "10" ]; then
         echo "   Log: $T10_LOG"
         exit 1
     fi
-fi
-
-if [ "$suite_opt" == "11" ]; then
-    echo ""
-    echo "=> Starting Test 11: DFlash Benchmark (Qwen3-Coder-Next-4bit)"
-    chmod +x bench_coder_next.sh
-    ./bench_coder_next.sh
-    exit $?
-fi
-
-if [ "$suite_opt" == "12" ]; then
-    echo ""
-    echo "=> Starting Test 12: DFlash Benchmark (Qwen3.6-35B-A3B-4bit)"
-    chmod +x bench_35b.sh
-    ./bench_35b.sh
-    exit $?
 fi
 
 # Fallback to Test 1 for anything else

@@ -86,13 +86,13 @@ print_server_log() {
     fi
 }
 
-echo "=============================================="
 export METAL_LIBRARY_PATH="$(pwd)/.build/arm64-apple-macosx/release"
 
 if [ -n "${SUITE_OPT:-}" ]; then
     # Sub-process invocation from automated matrix — skip interactive menu
     suite_opt="$SUITE_OPT"
 else
+    echo "=============================================="
     echo "    Aegis-AI MLX Profiling Benchmark Suite    "
     echo "=============================================="
     echo ""

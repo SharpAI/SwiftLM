@@ -39,6 +39,18 @@ public protocol DFlashTargetModel: LanguageModel {
 
     /// Whether the model contains hybrid GatedDeltaNet layers.
     var dflashIsHybridGDN: Bool { get }
+
+    /// Whether the hybrid GDN layers should use full innovation-tape rollback
+    /// (RecurrentRollbackCache) vs lightweight snapshot-only rollback
+    /// (MambaSnapshotCache). Tape rollback is more accurate but ~30% slower
+    /// on large models due to the per-step innovation tensor overhead.
+    /// Default: true (tape rollback).
+    var dflashUseTapeRollback: Bool { get }
+}
+
+// Default: tape rollback for backward compatibility.
+public extension DFlashTargetModel {
+    var dflashUseTapeRollback: Bool { true }
 }
 
 // MARK: - DFlash Generation Event
@@ -139,8 +151,9 @@ public enum DFlashRuntime {
     // MARK: - Target Cache Management
 
     /// Create the appropriate cache entries for the target model.
-    /// For hybrid GDN models, replaces MambaCache with RecurrentRollbackCache
-    /// for GDN (linear attention) layers.
+    /// For hybrid GDN models, replaces MambaCache with a rollback-capable variant:
+    ///   - dflashUseTapeRollback=true  → RecurrentRollbackCache (accurate, ~30% slower on large models)
+    ///   - dflashUseTapeRollback=false → MambaSnapshotCache (snapshot-only, O(1) overhead)
     public static func makeTargetCache(
         targetModel: any DFlashTargetModel
     ) -> [KVCache] {
@@ -148,7 +161,9 @@ public enum DFlashRuntime {
         if targetModel.dflashIsHybridGDN {
             for i in 0 ..< cache.count {
                 if cache[i] is MambaCache {
-                    cache[i] = RecurrentRollbackCache()
+                    cache[i] = targetModel.dflashUseTapeRollback
+                        ? RecurrentRollbackCache()
+                        : MambaSnapshotCache()
                 }
             }
         }
@@ -156,26 +171,22 @@ public enum DFlashRuntime {
     }
 
     /// Arm all rollback-capable caches in the target model.
-    /// For DFlashRollbackCache (GDN layers), arms for tape recording.
-    /// For MambaCache, checkpoints the state.
+    /// RecurrentRollbackCache arms for innovation-tape recording.
+    /// MambaSnapshotCache takes a lazy state snapshot (O(1), no GPU copy).
+    /// Plain MambaCache instances are not checkpointed.
     public static func armTargetRollback(targetCache: [KVCache], prefixLen: Int) {
         for cache in targetCache {
             if let rollbackCache = cache as? DFlashRollbackCache {
                 rollbackCache.armRollback(prefixLen: prefixLen)
             }
-            // Note: Python only calls arm_rollback on caches that implement it.
-            // Plain MambaCache instances are NOT checkpointed here.
         }
     }
 
     /// Restore the target cache after partial acceptance of draft tokens.
     ///
-    /// For MambaCache: we don't have innovation-tape rollback (unlike the Python
-    /// reference which uses RecurrentRollbackCache with speculative hooks). Instead,
-    /// we clear the checkpoint. The GDN state will contain contributions from all
-    /// verify tokens including rejected ones, but the attention layers' KV caches
-    /// will be correctly trimmed. This is a known quality trade-off that slightly
-    /// reduces acceptance rate for GDN layers.
+    /// RecurrentRollbackCache: replays innovation tape for accepted steps (exact).
+    /// MambaSnapshotCache: restores pre-verify snapshot (fast, loses accepted steps).
+    /// KVCacheSimple: trims KV entries for rejected tokens.
     ///
     /// For KVCacheSimple: trim to remove rejected tokens' KV entries.
     ///

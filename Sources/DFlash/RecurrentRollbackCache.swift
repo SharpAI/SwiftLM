@@ -44,30 +44,33 @@ public final class RecurrentRollbackCache: MambaCache, DFlashRollbackCache, @unc
     // MARK: - Arming & Recording
 
     /// Arm the cache for tape recording and snapshot the current state.
+    ///
+    /// Uses lazy reference capture (no MLX.contiguous copy) — MLXArray is
+    /// reference-counted so the old arrays remain alive after the cache is
+    /// updated during the forward pass. The copy only happens if/when
+    /// rollback() actually replays the tape.
     public func armRollback(prefixLen: Int = 0) {
         armed = true
         tape = nil
         tapeK = nil
         tapeG = nil
         tapeQKV = nil
-        // Snapshot slots 0 and 1 (deep copy via ellipsis)
-        snapshotState = [
-            self[0].map { MLX.contiguous($0[.ellipsis]) },
-            self[1].map { MLX.contiguous($0[.ellipsis]) }
-        ]
+        // Lazy snapshot: just hold references, no GPU copy needed
+        snapshotState = [self[0], self[1]]
     }
 
     /// Record the innovation tape from a GatedDeltaNet forward step.
+    /// Arrays are stored by reference — MLX evaluates them lazily when needed.
     public func recordTape(
         tape: MLXArray,
         k: MLXArray,
         g: MLXArray,
         qkv: MLXArray
     ) {
-        self.tape = MLX.contiguous(tape)
-        self.tapeK = MLX.contiguous(k)
-        self.tapeG = MLX.contiguous(g)
-        self.tapeQKV = MLX.contiguous(qkv)
+        self.tape = tape
+        self.tapeK = k
+        self.tapeG = g
+        self.tapeQKV = qkv
     }
 
     /// Whether the cache is currently armed.
@@ -140,7 +143,7 @@ public final class RecurrentRollbackCache: MambaCache, DFlashRollbackCache, @unc
         let convInput = concatenated([prefix, tapeQKV], axis: 1)
         let start = acceptedSteps
         let end = min(start + keep, convInput.dim(1))
-        return MLX.contiguous(convInput[0..., start ..< end, 0...])
+        return convInput[0..., start ..< end, 0...]
     }
 
     // MARK: - Cleanup
@@ -166,3 +169,54 @@ public final class RecurrentRollbackCache: MambaCache, DFlashRollbackCache, @unc
         return trimmed
     }
 }
+
+// MARK: - MambaSnapshotCache
+
+/// Lightweight snapshot-based rollback for hybrid SSM models (e.g. Qwen3Next).
+///
+/// Unlike RecurrentRollbackCache, this does NOT record an innovation tape.
+/// On partial acceptance, it restores the pre-verify SSM state snapshot.
+/// The accepted tokens' state contributions are lost (state reverts to
+/// pre-verify position), but rejected tokens' contamination is prevented.
+/// Overhead: O(1) per cycle (lazy reference capture, no GPU copies).
+public final class MambaSnapshotCache: MambaCache, DFlashRollbackCache, @unchecked Sendable {
+
+    private var snapshotConv: MLXArray?
+    private var snapshotRecurrent: MLXArray?
+    private var armed = false
+
+    public var isArmed: Bool { armed }
+
+    public func armRollback(prefixLen: Int = 0) {
+        armed = true
+        // Lazy reference capture — no GPU copy, O(1)
+        snapshotConv = self[0]
+        snapshotRecurrent = self[1]
+    }
+
+    public func rollback(nAccepted: Int) {
+        // Restore pre-verify state. Accepted tokens' contributions are
+        // not replayed, but rejected tokens are excluded.
+        self[0] = snapshotConv
+        self[1] = snapshotRecurrent
+        clearTransients()
+    }
+
+    public func clearTransients() {
+        armed = false
+        snapshotConv = nil
+        snapshotRecurrent = nil
+    }
+
+    public func recordTape(tape: MLXArray, k: MLXArray, g: MLXArray, qkv: MLXArray) {
+        // No tape needed for snapshot-based rollback
+    }
+
+    @discardableResult
+    public override func trim(_ n: Int) -> Int {
+        let trimmed = min(offset, n)
+        offset -= trimmed
+        return trimmed
+    }
+}
+

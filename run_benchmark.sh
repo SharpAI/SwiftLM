@@ -107,7 +107,11 @@ echo "10) Test 10: SSD + Draft Model Memory Regression (Issue #72 — auto-cap +
 echo "11) Test 11: DFlash Benchmark (Qwen3-Coder-Next-4bit)"
 echo "12) Test 12: DFlash Benchmark (Qwen3.6-35B-A3B-4bit)"
 echo "q) Quit"
-read -p "Option (0-12/q): " suite_opt
+if [ -n "${SUITE_OPT:-}" ]; then
+    suite_opt="$SUITE_OPT"
+else
+    read -p "Option (0-12/q): " suite_opt
+fi
 
 if [ "$suite_opt" == "0" ]; then
     echo "=============================================="
@@ -128,7 +132,7 @@ if [ "$suite_opt" == "0" ]; then
             MODEL=$(python3 scripts/hf_discovery.py "mlx-community/Qwen Audio Instruct" || echo "mlx-community/Qwen2-Audio-7B-Instruct")
         fi
         
-        echo -e "$TEST_ID" | MODEL=$MODEL HEADLESS=1 ./run_benchmark.sh
+        SUITE_OPT=$TEST_ID MODEL=$MODEL ./run_benchmark.sh
         sleep 5
     done
     echo "✅ Offline matrix execution fully completed."

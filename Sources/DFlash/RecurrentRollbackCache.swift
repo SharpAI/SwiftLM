@@ -7,7 +7,18 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+// MARK: - DFlashRollbackCache
+
+public protocol DFlashRollbackCache: AnyObject {
+    var isArmed: Bool { get }
+    func armRollback(prefixLen: Int)
+    func rollback(nAccepted: Int)
+    func clearTransients()
+    func recordTape(tape: MLXArray, k: MLXArray, g: MLXArray, qkv: MLXArray)
+}
+
 // MARK: - RecurrentRollbackCache
+
 
 /// A cache for GatedDeltaNet (recurrent) layers that supports
 /// speculative decoding rollback via innovation tape replay.

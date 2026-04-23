@@ -1066,10 +1066,7 @@ actor ServerStats {
     }
 }
 
-extension ModelContainer {
-    /// Extract the underlying model as a DFlashTargetModel, if it conforms.
-    /// Returns nil if the model doesn't support DFlash.
-}
+
 
 actor PromptCache {
     struct CachedState {

@@ -616,6 +616,7 @@ struct MLXServer: AsyncParsableCommand {
             }
             draftModelRef = await draftContainer.extractDraftModel()
             print("[SwiftLM] Draft model loaded successfully (\(numDraftTokensConfig) tokens/round)")
+            print("[SwiftLM] Using speculative decoding: \(draftModelPath) → \(modelId) (\(numDraftTokensConfig) draft tokens/round)")
         } else {
             draftModelRef = nil
         }
@@ -1418,6 +1419,7 @@ func handleChatCompletion(
     // to DFlashTargetModel, we use DFlashRuntime.generate instead of the standard path.
     if let dflashDraft = dflashModel, let targetModel = dflashTargetModel {
         print("[SwiftLM] ⚡ DFlash block-diffusion speculative decoding active")
+        print("[SwiftLM] Using speculative decoding: DFlash block-diffusion mode active")
         fflush(stdout)
         // Convert DFlashEvent stream to Generation stream with proper streaming detokenizer
         let dflashTokenizer = await container.tokenizer

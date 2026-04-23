@@ -345,6 +345,8 @@ struct MLXServer: AsyncParsableCommand {
             draftFootprintBytes = 0
         }
 
+        var mainModelProfile: ModelProfile? = nil
+
         if self.streamExperts, let modelDir = modelDirectory {
             setenv("EXPERIMENTAL_SSD_STREAM", modelDir.path, 1)
             // Activate the modern Swift ExpertStreamingConfig so Load.swift can:
@@ -381,7 +383,8 @@ struct MLXServer: AsyncParsableCommand {
             Memory.cacheLimit = computeSSDMemoryBudget(totalRAMBytes: system.totalRAMBytes, draftWeightBytes: draftFootprintBytes)
 
             // Determine safe memoryLimit sentinel
-            let mainFootprintBytes = ModelProfiler.profile(modelDirectory: modelDir, modelId: modelId)?.weightFileSizeBytes ?? 0
+            mainModelProfile = ModelProfiler.profile(modelDirectory: modelDir, modelId: modelId)
+            let mainFootprintBytes = mainModelProfile?.weightFileSizeBytes ?? 0
             let combinedFootprint = mainFootprintBytes + draftFootprintBytes
             let physicalRAM = Int(system.totalRAMBytes)
             let combinedExceedsRAM = combinedFootprint > Int(Double(physicalRAM) * 0.70)
@@ -417,8 +420,9 @@ struct MLXServer: AsyncParsableCommand {
         }
         
         var partitionPlan: PartitionPlan?
-        if let modelDir = modelDirectory,
-           let profile = ModelProfiler.profile(modelDirectory: modelDir, modelId: modelId) {
+        if let modelDir = modelDirectory {
+           let profile = mainModelProfile ?? ModelProfiler.profile(modelDirectory: modelDir, modelId: modelId)
+           if let profile = profile {
             let system = ModelProfiler.systemProfile()
             let contextSize = self.ctxSize ?? 4096
             let plan = ModelProfiler.plan(model: profile, system: system, contextSize: contextSize)
@@ -441,7 +445,6 @@ struct MLXServer: AsyncParsableCommand {
                     // draftFootprintBytes pre-computed once above (Copilot review).
                     let physicalBudget = computeSSDMemoryBudget(totalRAMBytes: system.totalRAMBytes, draftWeightBytes: draftFootprintBytes)
                     Memory.cacheLimit = physicalBudget
-                    Memory.memoryLimit = 200 * 1024 * 1024 * 1024 // 200GB sentinel to bypass MLX eval_impl spin loop
                     print("[SwiftLM] 💾 Memory strategy: SSD STREAMING (page-cache managed, \(physicalBudget / (1024*1024*1024))GB RAM budget, no swap)")
                 } else {
                     Memory.cacheLimit = plan.recommendedCacheLimit
@@ -453,7 +456,6 @@ struct MLXServer: AsyncParsableCommand {
                     // draftFootprintBytes pre-computed once above (Copilot review).
                     let physicalBudget = computeSSDMemoryBudget(totalRAMBytes: system.totalRAMBytes, draftWeightBytes: draftFootprintBytes)
                     Memory.cacheLimit = physicalBudget
-                    Memory.memoryLimit = 200 * 1024 * 1024 * 1024 // 200GB sentinel to bypass MLX eval_impl spin loop
                     print("[SwiftLM] 💾 Memory strategy: SSD STREAMING (page-cache managed, \(physicalBudget / (1024*1024*1024))GB RAM budget, no swap)")
                 } else {
                     Memory.cacheLimit = plan.recommendedCacheLimit
@@ -465,6 +467,7 @@ struct MLXServer: AsyncParsableCommand {
                 print("[SwiftLM] \(plan.strategy.emoji) WARNING: Model is \(String(format: "%.1f", plan.overcommitRatio))× system RAM. Loading will be extremely slow.")
                 for w in plan.warnings { print("[SwiftLM]    \(w)") }
             }
+           }
         } else if self.info {
             print("[SwiftLM] Model not yet downloaded. Run without --info to download first, or provide a local path.")
             return

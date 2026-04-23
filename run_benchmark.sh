@@ -1174,11 +1174,12 @@ if [ "$suite_opt" == "10" ]; then
 
     # Measure RAM via vm_stat (Apple Silicon page size = 16384 bytes)
     get_ram_gb_t10() {
-        vm_stat | awk '
+        PAGE_SIZE=$(sysctl -n hw.pagesize)
+        vm_stat | awk -v page_size="$PAGE_SIZE" '
             /Pages active:/        { v=$3; gsub(/\./, "", v); act=v+0 }
             /Pages wired down:/    { v=$4; gsub(/\./, "", v); wire=v+0 }
             /Pages occupied by compressor:/ { v=$5; gsub(/\./, "", v); comp=v+0 }
-            END { printf "%.2f", (act+wire+comp)*16384/1073741824 }
+            END { printf "%.2f", (act+wire+comp)*page_size/1073741824 }
         '
     }
 

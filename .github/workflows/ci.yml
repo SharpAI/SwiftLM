@@ -292,11 +292,12 @@ jobs:
       - name: Snapshot RAM before test
         id: ram_before
         run: |
-          RAM=$(vm_stat | awk '
+          PAGE_SIZE=$(sysctl -n hw.pagesize)
+          RAM=$(vm_stat | awk -v page_size="$PAGE_SIZE" '
             /Pages active:/        { v=$3; gsub(/\./, "", v); act=v+0 }
             /Pages wired down:/    { v=$4; gsub(/\./, "", v); wire=v+0 }
             /Pages occupied by compressor:/ { v=$5; gsub(/\./, "", v); comp=v+0 }
-            END { printf "%.2f", (act+wire+comp)*16384/1073741824 }
+            END { printf "%.2f", (act+wire+comp)*page_size/1073741824 }
           ')
           echo "ram_before=$RAM" >> $GITHUB_OUTPUT
           echo "RAM before eval: ${RAM} GB"
@@ -326,11 +327,12 @@ jobs:
         if: always()
         id: ram_after
         run: |
-          RAM=$(vm_stat | awk '
+          PAGE_SIZE=$(sysctl -n hw.pagesize)
+          RAM=$(vm_stat | awk -v page_size="$PAGE_SIZE" '
             /Pages active:/        { v=$3; gsub(/\./, "", v); act=v+0 }
             /Pages wired down:/    { v=$4; gsub(/\./, "", v); wire=v+0 }
             /Pages occupied by compressor:/ { v=$5; gsub(/\./, "", v); comp=v+0 }
-            END { printf "%.2f", (act+wire+comp)*16384/1073741824 }
+            END { printf "%.2f", (act+wire+comp)*page_size/1073741824 }
           ')
           echo "ram_after=$RAM" >> $GITHUB_OUTPUT
           echo "RAM after eval: ${RAM} GB"
@@ -411,11 +413,12 @@ jobs:
       - name: Snapshot RAM baseline
         id: ram_base
         run: |
-          RAM=$(vm_stat | awk '
+          PAGE_SIZE=$(sysctl -n hw.pagesize)
+          RAM=$(vm_stat | awk -v page_size="$PAGE_SIZE" '
             /Pages active:/        { v=$3; gsub(/\./, "", v); act=v+0 }
             /Pages wired down:/    { v=$4; gsub(/\./, "", v); wire=v+0 }
             /Pages occupied by compressor:/ { v=$5; gsub(/\./, "", v); comp=v+0 }
-            END { printf "%.2f", (act+wire+comp)*16384/1073741824 }
+            END { printf "%.2f", (act+wire+comp)*page_size/1073741824 }
           ')
           TOTAL=$(sysctl -n hw.memsize | awk '{printf "%.0f", $1/1073741824}')
           LIMIT=$(echo "$TOTAL * 0.85" | bc | cut -d. -f1)
@@ -458,11 +461,12 @@ jobs:
       - name: Snapshot RAM after model load
         id: ram_loaded
         run: |
-          RAM=$(vm_stat | awk '
+          PAGE_SIZE=$(sysctl -n hw.pagesize)
+          RAM=$(vm_stat | awk -v page_size="$PAGE_SIZE" '
             /Pages active:/        { v=$3; gsub(/\./, "", v); act=v+0 }
             /Pages wired down:/    { v=$4; gsub(/\./, "", v); wire=v+0 }
             /Pages occupied by compressor:/ { v=$5; gsub(/\./, "", v); comp=v+0 }
-            END { printf "%.2f", (act+wire+comp)*16384/1073741824 }
+            END { printf "%.2f", (act+wire+comp)*page_size/1073741824 }
           ')
           echo "ram_loaded=$RAM" >> $GITHUB_OUTPUT
           echo "RAM after load: ${RAM} GB"
@@ -485,13 +489,14 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"model":"test","messages":[{"role":"user","content":"What is 2+2? One word."}],"max_tokens":32,"stream":false}' \
             2>/dev/null || echo "{}")
-          echo "inf_result=$RESULT" >> $GITHUB_OUTPUT
+          echo "$RESULT" > /tmp/inf_result.json
 
-          RAM=$(vm_stat | awk '
+          PAGE_SIZE=$(sysctl -n hw.pagesize)
+          RAM=$(vm_stat | awk -v page_size="$PAGE_SIZE" '
             /Pages active:/        { v=$3; gsub(/\./, "", v); act=v+0 }
             /Pages wired down:/    { v=$4; gsub(/\./, "", v); wire=v+0 }
             /Pages occupied by compressor:/ { v=$5; gsub(/\./, "", v); comp=v+0 }
-            END { printf "%.2f", (act+wire+comp)*16384/1073741824 }
+            END { printf "%.2f", (act+wire+comp)*page_size/1073741824 }
           ')
           echo "ram_peak=$RAM" >> $GITHUB_OUTPUT
           echo "RAM after inference: ${RAM} GB"
@@ -508,7 +513,7 @@ jobs:
 
       - name: "[3/3] Validate inference response"
         run: |
-          RESULT='${{ steps.ram_peak.outputs.inf_result }}'
+          RESULT=$(cat /tmp/inf_result.json)
           if echo "$RESULT" | grep -q '"content"'; then
             TEXT=$(echo "$RESULT" | python3 -c \
               "import sys,json;d=json.load(sys.stdin);print(d['choices'][0]['message']['content'])" \

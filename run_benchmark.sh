@@ -1161,14 +1161,22 @@ fi
 #   ✅ Peak RAM < 80% physical RAM (proves no swap explosion)
 #   ✅ /v1/chat/completions returns content (proves the combo is functional)
 if [ "$suite_opt" == "10" ]; then
+    T10_PORT=15472
+    T10_MAIN="$MODEL"
+    
+    echo ""
+    read -p "   Enter Draft Model HuggingFace ID (default: mlx-community/Qwen3.5-0.8B-MLX-4bit): " custom_draft
+    if [ -z "$custom_draft" ]; then
+        T10_DRAFT="mlx-community/Qwen3.5-0.8B-MLX-4bit"
+    else
+        T10_DRAFT="$custom_draft"
+    fi
+    
     echo ""
     echo "=> Test 10: Issue #72 SSD + Draft Model Memory Regression"
-    echo "   Main:  mlx-community/Qwen3.5-4B-MLX-4bit  (SSD-streamed)"
-    echo "   Draft: mlx-community/Qwen3.5-0.8B-MLX-4bit (in-RAM)"
+    echo "   Main:  $T10_MAIN  (SSD-streamed)"
+    echo "   Draft: $T10_DRAFT (in-RAM)"
 
-    T10_PORT=15472
-    T10_MAIN="mlx-community/Qwen3.5-4B-MLX-4bit"
-    T10_DRAFT="mlx-community/Qwen3.5-0.8B-MLX-4bit"
     T10_LOG="./tmp/test10_issue72.log"
     mkdir -p tmp
 

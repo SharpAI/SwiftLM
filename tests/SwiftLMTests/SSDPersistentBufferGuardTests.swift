@@ -41,24 +41,22 @@ final class SSDDraftStrategyTests: XCTestCase {
             "Auto-capped 1 draft token → 2-position verify fan-out (2× SSD I/O cost)")
     }
 
-    /// Net throughput is positive when: acceptance_rate × draft_tps > fan_out_penalty × base_tps
-    /// At 50% acceptance and 2× fan-out this is just barely net-neutral.
-    /// At 70% acceptance (typical for family models) it's clearly positive.
+    /// With 1 draft token, the verify pass covers 2 positions, so SSD I/O fan-out is 2×.
+    /// In this simplified model, break-even acceptance is therefore 1 / fan_out = 50%.
+    /// At 70% acceptance (typical for same-family models), the capped strategy is on the
+    /// positive side of that threshold.
     func testNetThroughput_CappedDraft_PositiveAt70PctAcceptance() {
-        let baseTPS      = 5.0    // tok/s for SSD streaming alone
-        let draftTPS     = 73.0   // tok/s for a 4B draft model in RAM
         let fanOutPenalty = 2.0   // 2× I/O at 1 draft token
-        let acceptRate   = 0.70   // typical for same-family models
+        let acceptRate = 0.70     // typical for same-family models
 
-        // Net effective TPS with draft (simplified model):
-        // Each round: draft generates 1 token fast, main verifies 2 positions.
-        // If accepted: 1 extra token at draft speed per round.
-        // Cost: main model verify at base_tps / fan_out_penalty.
-        let effectiveVerifyTPS = baseTPS / fanOutPenalty
-        let netTPS = effectiveVerifyTPS + acceptRate * (draftTPS / draftTPS)
+        // Reframe the assertion around the auto-cap arithmetic directly:
+        // break-even acceptance_rate = 1 / verify_positions = 1 / fanOutPenalty.
+        let breakEvenAcceptanceRate = 1.0 / fanOutPenalty
 
-        XCTAssertGreaterThan(netTPS, effectiveVerifyTPS,
-            "At 70% acceptance + 1 draft token, net TPS must exceed un-assisted verify TPS")
+        XCTAssertEqual(breakEvenAcceptanceRate, 0.50, accuracy: 0.000_001,
+            "At 1 draft token, 2 verify positions imply a 50% break-even acceptance threshold")
+        XCTAssertGreaterThan(acceptRate, breakEvenAcceptanceRate,
+            "At 70% acceptance + 1 draft token, acceptance is above the capped 2-position break-even threshold")
     }
 
     /// Auto-cap logic: numDraftTokens > 1 when SSD + draft → should be capped to 1.
@@ -125,13 +123,13 @@ final class SSDDraftStrategyTests: XCTestCase {
     /// This is the exact reporter scenario: 35B main (20.4 GB) + 4B draft (3.0 GB).
     func testMemoryLimit_TightCap_Issue72ReporterScenario() {
         let physicalRAM = Int(16.0 * Double(gb))
-        let mainBytes   = Int(20.4 * 1e9)
-        let draftBytes  = Int(3.0  * 1e9)
+        let mainBytes   = Int(20.4 * Double(gb))
+        let draftBytes  = Int(3.0  * Double(gb))
         let combined    = mainBytes + draftBytes
-        let threshold   = Int(Double(physicalRAM) * 0.70)  // 11.2 GB
+        let threshold   = Int(Double(physicalRAM) * 0.70)  // 11.2 GiB
 
         XCTAssertGreaterThan(combined, threshold,
-            "Reporter scenario: 23.4 GB combined must exceed 70% of 16 GB physical RAM")
+            "Reporter scenario: 23.4 GiB combined must exceed 70% of 16 GiB physical RAM")
 
         let tightCap   = Int(Double(physicalRAM) * 1.1)    // ~17.6 GB
         let sentinel   = 200 * gb
@@ -140,7 +138,7 @@ final class SSDDraftStrategyTests: XCTestCase {
         let hasDraftBytes = draftBytes > 0
         let limit = (combined > threshold && hasDraftBytes) ? tightCap : sentinel
         XCTAssertEqual(limit, tightCap,
-            "16 GB + combined 23.4 GB: tight cap (~17 GB) must be chosen over 200 GB sentinel")
+            "16 GiB + combined 23.4 GiB: tight cap (~17.6 GiB) must be chosen over 200 GiB sentinel")
         XCTAssertLessThan(limit, 20 * gb,
             "Tight cap must be well below 20 GB to force MLX eviction over swap")
     }
@@ -148,13 +146,13 @@ final class SSDDraftStrategyTests: XCTestCase {
     /// On a 64 GB machine the 200 GB sentinel is preserved — benchmark hardware unaffected.
     func testMemoryLimit_Sentinel_PreservedOn64GB() {
         let physicalRAM = Int(64.0 * Double(gb))
-        let mainBytes   = Int(20.4 * 1e9)
-        let draftBytes  = Int(3.0  * 1e9)
+        let mainBytes   = Int(20.4 * Double(gb))
+        let draftBytes  = Int(3.0  * Double(gb))
         let combined    = mainBytes + draftBytes
-        let threshold   = Int(Double(physicalRAM) * 0.70)  // 44.8 GB
+        let threshold   = Int(Double(physicalRAM) * 0.70)  // 44.8 GiB
 
         XCTAssertLessThan(combined, threshold,
-            "64 GB machine: 23.4 GB combined fits within 70% threshold — sentinel should apply")
+            "64 GiB machine: 23.4 GiB combined fits within 70% threshold — sentinel should apply")
 
         let tightCap = Int(Double(physicalRAM) * 1.1)
         let sentinel = 200 * gb
@@ -167,7 +165,7 @@ final class SSDDraftStrategyTests: XCTestCase {
     /// Solo SSD streaming (no draft): sentinel always used, warm path always active.
     func testMemoryLimit_Sentinel_SoloSSDStreaming() {
         let physicalRAM = Int(16.0 * Double(gb))
-        let mainBytes   = Int(20.4 * 1e9)
+        let mainBytes   = Int(20.4 * Double(gb))
         let draftBytes  = 0   // no draft model
         let combined    = mainBytes + draftBytes
         let threshold   = Int(Double(physicalRAM) * 0.70)

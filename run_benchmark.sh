@@ -128,7 +128,7 @@ if [ "$suite_opt" == "0" ]; then
             MODEL=$(python3 scripts/hf_discovery.py "mlx-community/Qwen Audio Instruct" || echo "mlx-community/Qwen2-Audio-7B-Instruct")
         fi
         
-        echo -e "$TEST_ID\n11\n$MODEL" | HEADLESS=1 ./run_benchmark.sh
+        echo -e "$TEST_ID" | MODEL=$MODEL HEADLESS=1 ./run_benchmark.sh
         sleep 5
     done
     echo "✅ Offline matrix execution fully completed."
@@ -260,28 +260,30 @@ else
     )
 fi
 
-select opt in "${options[@]}"
-do
-    case $opt in
-        "Custom (Enter your own Hub ID)")
-            read -p "Enter HuggingFace ID (e.g., mlx-community/Llama-3.2-3B-Instruct-4bit): " custom_model
-            MODEL=$custom_model
-            break
-            ;;
-        "Quit")
-            echo "Exiting."
-            exit 0
-            ;;
-        *) 
-            if [[ -n "$opt" ]]; then
-                MODEL=$opt
+if [ -z "$MODEL" ]; then
+    select opt in "${options[@]}"
+    do
+        case $opt in
+            "Custom (Enter your own Hub ID)")
+                read -p "Enter HuggingFace ID (e.g., mlx-community/Llama-3.2-3B-Instruct-4bit): " custom_model
+                MODEL=$custom_model
                 break
-            else
-                echo "Invalid option $REPLY"
-            fi
-            ;;
-    esac
-done
+                ;;
+            "Quit")
+                echo "Exiting."
+                exit 0
+                ;;
+            *) 
+                if [[ -n "$opt" ]]; then
+                    MODEL=$opt
+                    break
+                else
+                    echo "Invalid option $REPLY"
+                fi
+                ;;
+        esac
+    done
+fi
 
 # Ensure model has an org prefix if it doesn't already
 if [[ "$MODEL" != *"/"* ]]; then

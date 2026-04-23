@@ -1154,6 +1154,9 @@ actor PromptCache {
     /// If not materialized now, those lazy references point to the live cache tensors
     /// which get overwritten by subsequent requests, causing stale data / SIGTRAP on restore.
     func save(tokens: [Int], cache: [KVCache]) {
+        if cache.contains(where: { $0 is MambaCache }) {
+            return
+        }
         let states = cache.map { $0.state }
         let metaStates = cache.map { $0.metaState }
         // Materialize all lazy MLX arrays so they survive cache mutations
@@ -1168,6 +1171,14 @@ actor PromptCache {
     /// Restores matched KV state, trims any excess — mirrors llama-server behaviour.
     /// Returns the number of matched tokens, or nil on a complete miss.
     func restore(newTokens: [Int], into cache: [KVCache]) -> Int? {
+        // MambaCache/RNN states cannot be arbitrarily rolled back or safely saved
+        // after the fact without exact sequence-boundary synchronization.
+        // Disable prompt caching entirely for hybrid models (e.g. Qwen3Next).
+        if cache.contains(where: { $0 is MambaCache }) {
+            misses += 1
+            return nil
+        }
+
         guard let cached, !cached.tokens.isEmpty else {
             misses += 1
             return nil

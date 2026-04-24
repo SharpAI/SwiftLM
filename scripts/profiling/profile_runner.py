@@ -1,5 +1,6 @@
 import argparse
 import subprocess
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -176,6 +177,11 @@ def get_gpu_alloc_gb():
         return 0, 0
 
 def make_request_stream(prompt_len, max_tokens, port=5422):
+    """Run a streaming inference request and return (ok, ttft, tps, peak_gpu_in_use_gb).
+    GPU 'In use system memory' is polled every 0.5s in a background thread so we
+    capture the PEAK physical RAM usage during the full prefill+generation window,
+    not a post-generation snapshot after macOS has evicted layer weights back to SSD.
+    """
     prompt = "apple " * int(prompt_len * 0.75)
     data = json.dumps({
         "messages": [{"role": "user", "content": prompt}],
@@ -183,13 +189,28 @@ def make_request_stream(prompt_len, max_tokens, port=5422):
         "temperature": 0.0,
         "stream": True
     }).encode('utf-8')
-    
+
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/chat/completions",
         data=data,
         headers={'Content-Type': 'application/json'}
     )
-    
+
+    # ── Background GPU-memory poller ──────────────────────────────────────────
+    peak_in_use = [0.0]
+    poller_stop = threading.Event()
+
+    def _poll_gpu():
+        while not poller_stop.is_set():
+            _, in_use = get_gpu_alloc_gb()
+            if in_use > peak_in_use[0]:
+                peak_in_use[0] = in_use
+            poller_stop.wait(timeout=0.5)
+
+    poller = threading.Thread(target=_poll_gpu, daemon=True)
+    poller.start()
+    # ─────────────────────────────────────────────────────────────────────────
+
     ttft = None
     start = time.time()
     tokens = 0
@@ -205,13 +226,17 @@ def make_request_stream(prompt_len, max_tokens, port=5422):
                     if ttft is None:
                         ttft = time.time() - start
                     tokens += 1
-            total_time = time.time() - start
-            gen_time = total_time - ttft if ttft else 0
-            tps = (tokens - 1) / gen_time if gen_time > 0 and tokens > 1 else 0
-            return True, ttft, tps
+        total_time = time.time() - start
+        gen_time = total_time - ttft if ttft else 0
+        tps = (tokens - 1) / gen_time if gen_time > 0 and tokens > 1 else 0
+        poller_stop.set()
+        poller.join(timeout=2)
+        return True, ttft, tps, peak_in_use[0]
     except Exception as e:
         print(f"Request failed: {e}")
-        return False, 0, 0
+        poller_stop.set()
+        poller.join(timeout=2)
+        return False, 0, 0, 0.0
 
 def extract_base_memory(log_path):
     try:
@@ -323,16 +348,20 @@ def main():
         
         for ctx_size in context_sizes:
             print(f"\n>> Running {ctx_size}-token context test (max generation 60)...")
-            ok, ttft, tps = make_request_stream(prompt_len=ctx_size, max_tokens=60)
-            
+            ok, ttft, tps, peak_in_use = make_request_stream(prompt_len=ctx_size, max_tokens=60)
+
             # Wait for server to flush post-generation logs
             time.sleep(1)
-            
+
             os_ram = extract_os_ram(log_path)
-            
-            # Query Apple GPU driver for the TOTAL allocated memory (physical + swapped)
-            gpu_alloc, gpu_in_use = get_gpu_alloc_gb()
-            
+
+            # Query Apple GPU driver for the TOTAL allocated (physical + SSD-swapped) memory.
+            # This is a post-generation snapshot — accurate for GPU_Alloc (virtual) but NOT
+            # for GPU_InUse (physical): by the time generation finishes, SSD-streaming configs
+            # have already evicted layer weights back to SSD. We use the peak value captured
+            # during the request by the background poller instead.
+            gpu_alloc, _ = get_gpu_alloc_gb()
+
             if ok:
                 results.append({
                     "config": config["name"],
@@ -342,9 +371,9 @@ def main():
                     "static_mem": static_mem,
                     "os_ram": os_ram,
                     "gpu_alloc": f"{gpu_alloc:.1f}",
-                    "gpu_in_use": f"{gpu_in_use:.1f}",
+                    "gpu_in_use_peak": f"{peak_in_use:.1f}",
                 })
-                print(f"  TTFT={ttft:.2f}s  TPS={tps:.2f}  OS_RAM={os_ram}GB  GPU_Alloc={gpu_alloc:.1f}GB  GPU_InUse={gpu_in_use:.1f}GB")
+                print(f"  TTFT={ttft:.2f}s  TPS={tps:.2f}  OS_RAM={os_ram}GB  GPU_Alloc={gpu_alloc:.1f}GB  GPU_InUse(peak)={peak_in_use:.1f}GB")
             else:
                 print(f"  FAILED / OOM")
                 
@@ -357,13 +386,14 @@ def main():
     with open(args.out, "w") as f:
         f.write(f"### `{args.model}` — Context & Memory Profile\n\n")
         f.write(f"Context depths tested: {args.contexts}\n\n")
-        f.write("| Configuration | Context Size | TTFT | Generation Speed | Model Size | Active RAM (Physical) | GPU Memory Allocated |\n")
-        f.write("|---|---|---|---|---|---|---|\n")
+        f.write("| Configuration | Context Size | TTFT | Generation Speed | Model Size | Active RAM (OS) | GPU_Alloc (virtual) | GPU_InUse peak (physical) |\n")
+        f.write("|---|---|---|---|---|---|---|---|\n")
         for r in results:
-            f.write(f"| {r['config']} | {r['context']} | {r['ttft']}s | {r['tps']} tok/s | {r['static_mem']} | {r['os_ram']} GB | {r['gpu_alloc']} GB |\n")
-        
-        f.write(f"\n> **Active RAM (Physical)**: Real memory wired into RAM by macOS (capped by device RAM).\n")
-        f.write(f"> **GPU Memory Allocated**: Total memory requested by the GPU — includes data swapped to SSD. This shows the TRUE memory demand and reveals TurboQuant compression benefits even when Active RAM is saturated.\n")
+            f.write(f"| {r['config']} | {r['context']} | {r['ttft']}s | {r['tps']} tok/s | {r['static_mem']} | {r['os_ram']} GB | {r['gpu_alloc']} GB | {r['gpu_in_use_peak']} GB |\n")
+
+        f.write(f"\n> **Active RAM (OS)**: Memory wired into physical RAM by macOS (from server log).\n")
+        f.write(f"> **GPU_Alloc (virtual)**: Total GPU address-space allocation including SSD-backed pages — the TRUE memory demand, can exceed physical RAM.\n")
+        f.write(f"> **GPU_InUse peak (physical)**: Peak physical RAM occupied by the GPU during the entire request (prefill + generation), sampled every 0.5 s. This is the real active footprint — for SSD-streaming configs it reflects the high-water mark while layers are being read, not a post-generation snapshot.\n")
             
     print(f"\nDone. Matrix saved to {args.out}")
     
@@ -464,10 +494,10 @@ def print_visualization(results, model_name, baseline_alloc):
             crown = f" {C.YELLOW}★{C.RESET}" if ttft_val == best_in_ctx and len(ctx_results) > 1 else ""
             print(f"{label} {b} {val_str}{crown}")
 
-    # ── 3) GPU Memory Demand ──
-    print(f"\n{C.BOLD}  💾 GPU Memory Allocated (GB) — lower is better{C.RESET}")
+    # ── 3) GPU Memory Allocated (virtual, includes SSD) ──
+    print(f"\n{C.BOLD}  💾 GPU_Alloc (GB, virtual incl. SSD) — lower is better{C.RESET}")
     print(f"{C.DIM}  {'─' * (W - 4)}{C.RESET}")
-    
+
     all_gpu = [float(r["gpu_alloc"]) for r in results if r["gpu_alloc"] != "N/A"]
     max_gpu = max(all_gpu) if all_gpu else 1
 
@@ -485,7 +515,29 @@ def print_visualization(results, model_name, baseline_alloc):
             crown = f" {C.YELLOW}★{C.RESET}" if gpu_val == best_in_ctx and len(ctx_results) > 1 else ""
             print(f"{label} {b} {val_str}{crown}")
 
-    # ── 4) Summary scoreboard ──
+    # ── 4) GPU InUse peak (physical RAM high-water mark) ──
+    print(f"\n{C.BOLD}  💡 GPU_InUse peak (GB, physical RAM) — lower is better{C.RESET}")
+    print(f"{C.DIM}  Polled every 0.5s during prefill+generation; reflects real RAM pressure{C.RESET}")
+    print(f"{C.DIM}  {'─' * (W - 4)}{C.RESET}")
+
+    all_peak = [float(r["gpu_in_use_peak"]) for r in results if r.get("gpu_in_use_peak", "N/A") != "N/A"]
+    max_peak = max(all_peak) if all_peak else 1
+
+    for ctx in ctx_sizes:
+        ctx_results = [r for r in results if r["context"] == ctx]
+        ctx_label = f"{ctx:,} tokens"
+        print(f"\n  {C.BOLD}{C.WHITE}{ctx_label}{C.RESET}")
+        for r in ctx_results:
+            peak_val = float(r.get("gpu_in_use_peak", 0))
+            color = CONFIG_COLORS.get(r["config"], "")
+            label = f"    {r['config']:<20}"
+            b = bar(peak_val, max_peak, width=28, color=color)
+            val_str = f"{C.BOLD}{peak_val:>6.1f}{C.RESET} GB"
+            best_in_ctx = min(float(x.get("gpu_in_use_peak", 0)) for x in ctx_results)
+            crown = f" {C.YELLOW}★{C.RESET}" if peak_val == best_in_ctx and len(ctx_results) > 1 else ""
+            print(f"{label} {b} {val_str}{crown}")
+
+    # ── 5) Summary scoreboard ──
     print(f"\n{C.CYAN}{'─' * W}{C.RESET}")
     print(f"{C.BOLD}  🏆 Configuration Ranking (by avg TPS across all contexts){C.RESET}")
     print(f"{C.DIM}  {'─' * (W - 4)}{C.RESET}")
@@ -497,12 +549,13 @@ def print_visualization(results, model_name, baseline_alloc):
 
     ranked = sorted(config_avg.items(), key=lambda x: x[1], reverse=True)
     medals = ["🥇", "🥈", "🥉", "  "]
-    
+
     for i, (cfg_name, avg_tps) in enumerate(ranked):
         medal = medals[min(i, 3)]
         color = CONFIG_COLORS.get(cfg_name, "")
-        avg_gpu = sum(float(r["gpu_alloc"]) for r in results if r["config"] == cfg_name) / max(1, len([r for r in results if r["config"] == cfg_name]))
-        print(f"  {medal} {color}{C.BOLD}{cfg_name:<22}{C.RESET}  avg {avg_tps:>5.1f} tok/s  |  avg {avg_gpu:>5.1f} GB GPU")
+        avg_gpu_alloc = sum(float(r["gpu_alloc"]) for r in results if r["config"] == cfg_name) / max(1, len([r for r in results if r["config"] == cfg_name]))
+        avg_peak = sum(float(r.get("gpu_in_use_peak", 0)) for r in results if r["config"] == cfg_name) / max(1, len([r for r in results if r["config"] == cfg_name]))
+        print(f"  {medal} {color}{C.BOLD}{cfg_name:<22}{C.RESET}  avg {avg_tps:>5.1f} tok/s  |  alloc {avg_gpu_alloc:>5.1f} GB  |  peak {avg_peak:>5.1f} GB RAM")
 
     print(f"\n{C.CYAN}{'═' * W}{C.RESET}")
     print()

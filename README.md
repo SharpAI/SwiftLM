@@ -73,6 +73,25 @@ Benchmark results for `gemma-4-26b-a4b-it-4bit` (26B MoE, 4-bit) on M5 Pro 64 GB
 
 > Run `./run_benchmark.sh` to generate these metrics on your own device. (See **Benchmarks & Testing** below).
 
+### DeepSeek-V4-Flash (126 GB, Q3-mixed-gs128-affine) — M5 Pro 64 GB
+
+Model: [`Thump604/DeepSeek-V4-Flash-MLX-Q3-mixed-gs128-affine`](https://huggingface.co/Thump604/DeepSeek-V4-Flash-MLX-Q3-mixed-gs128-affine)
+
+> Dense/Vanilla and TurboQuant (non-SSD) configurations are skipped automatically — the 126 GB model exceeds physical RAM.
+
+| Configuration | 512 ctx | 40K ctx |
+|---|---|---|
+| SSD Stream | 4.65 tok/s · 28.4 GB | 0.32 tok/s · 60.5 GB |
+| **SSD + TurboQuant** | **4.78 tok/s · 29.5 GB** | **4.16 tok/s · 40.6 GB** |
+| SSD + 16-Worker Prefetch | 4.43 tok/s · 29.3 GB | 0.32 tok/s · 60.9 GB |
+
+> Values shown as `generation speed · GPU memory allocated (virtual, incl. SSD-backed pages)`
+
+**Key takeaways:**
+- 🏆 **SSD + TurboQuant dominates at long context** — 4.16 tok/s at 40K vs 0.32 tok/s for plain SSD Stream (**13× faster**), with 33% lower GPU allocation (40.6 GB vs 60.5 GB).
+- At 512-token context all configurations perform similarly (~4.4–4.8 tok/s); TurboQuant's advantage is KV-cache compression at long context.
+- Peak physical RAM (GPU InUse) stays ≤ 17 GB across all configurations — the rest streams from NVMe SSD.
+
 ---
 
 ## 🚀 Features

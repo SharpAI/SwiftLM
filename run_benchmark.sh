@@ -260,6 +260,7 @@ else
         "mlx-community/phi-4-mlx-4bit"
         "baa-ai/GLM-5.1-RAM-270GB-MLX"
         "baa-ai/GLM-5.1-4bit"
+        "Thump604/DeepSeek-V4-Flash-MLX-Q3-mixed-gs128-affine"
         "Custom (Enter your own Hub ID)"
         "Quit"
     )

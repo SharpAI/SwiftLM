@@ -664,6 +664,8 @@ struct MLXServer: AsyncParsableCommand {
                         DFlashKernelRegistry.provider = DFlashKernels.shared
                         DFlashDumper.setup()
                         print("[SwiftLM] DFlash draft model loaded (block_size=\(model.blockSize), \(model.targetLayerIDs.count) target layers, mask_token=\(model.maskTokenID))")
+                        print("[SwiftLM] Draft model loaded successfully (\(model.blockSize) block size, DFlash mode)")
+                        print("[SwiftLM] Using speculative decoding: \(resolvedDraftRef) → \(modelId) (DFlash block-diffusion)")
                     } catch {
                         print("[SwiftLM] ⚠️  Failed to load DFlash draft model: \(error)")
                         dflashModel = nil

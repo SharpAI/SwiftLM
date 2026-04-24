@@ -433,7 +433,7 @@ struct MLXServer: AsyncParsableCommand {
            if let profile = profile {
             let system = ModelProfiler.systemProfile()
             let contextSize = self.ctxSize ?? 4096
-            let plan = ModelProfiler.plan(model: profile, system: system, contextSize: contextSize)
+            let plan = ModelProfiler.plan(model: profile, system: system, contextSize: contextSize, draftWeightBytes: draftFootprintBytes)
             partitionPlan = plan
 
             // --info mode: print report and exit

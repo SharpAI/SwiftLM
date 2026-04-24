@@ -401,6 +401,14 @@ public class DeepseekV3DFlashModel: Module, LLMModel, KVCacheDimensionProvider, 
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        // Strip HuggingFace VLM wrapper prefix present in some checkpoints (e.g. kimi_k25).
+        let llmPrefix = "language_model."
+        var weights = weights.count > 0 && weights.keys.first!.hasPrefix(llmPrefix)
+            ? Dictionary(uniqueKeysWithValues: weights.map { k, v in
+                (k.hasPrefix(llmPrefix) ? String(k.dropFirst(llmPrefix.count)) : k, v)
+              })
+            : weights
+
         var w = weights
 
         func dequant(weight: MLXArray, scaleInv: MLXArray) -> MLXArray {
@@ -435,13 +443,19 @@ public class DeepseekV3DFlashModel: Module, LLMModel, KVCacheDimensionProvider, 
                             weights["\(prefix).mlp.experts.\($0).\(projName).\(key)"]!
                         }
                         w["\(prefix).mlp.switch_mlp.\(projName).\(key)"] = stacked(joined)
+                        // Remove per-expert keys — they have no corresponding module path
+                        // after stacking and would fail verify: .noUnusedKeys.
+                        for e in 0 ..< (args.nRoutedExperts ?? 1) {
+                            w.removeValue(forKey: "\(prefix).mlp.experts.\(e).\(projName).\(key)")
+                        }
                     }
                 }
             }
         }
 
         return w.filter { key, _ in
-            !key.starts(with: "model.layers.61") && !key.contains("rotary_emb.inv_freq")
+            !key.starts(with: "model.layers.\(args.numHiddenLayers)")
+                && !key.contains("rotary_emb.inv_freq")
         }
     }
 

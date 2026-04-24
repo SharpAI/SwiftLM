@@ -281,6 +281,15 @@ struct MLXServer: AsyncParsableCommand {
     var dflashBlockSize: Int?
 
     mutating func run() async throws {
+        // Raise the open-file limit: large sharded models (e.g. Kimi K2.5, 182 safetensor
+        // shards) + draft model + metallib + dylibs can exhaust the default macOS FD limit of 256.
+        var rl = rlimit()
+        getrlimit(RLIMIT_NOFILE, &rl)
+        if rl.rlim_cur < 4096 {
+            rl.rlim_cur = min(4096, rl.rlim_max)
+            setrlimit(RLIMIT_NOFILE, &rl)
+        }
+
         // Register SwiftLM-owned DFlash model types before any model loading.
         await registerDFlashModelTypes()
 

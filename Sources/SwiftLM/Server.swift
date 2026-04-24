@@ -356,8 +356,7 @@ struct MLXServer: AsyncParsableCommand {
         // instead of weightMemoryGB * 1_073_741_824 to avoid the ~7% GiB/GB
         // mismatch flagged in Copilot review (weightMemoryGB = bytes / 1e9, not /2^30).
         let draftFootprintBytes: Int
-        if self.streamExperts,
-           let draftPath = self.draftModel,
+        if let draftPath = self.draftModel,
            let draftDir = resolveModelDirectory(modelId: draftPath),
            let draftProfile = ModelProfiler.profile(modelDirectory: draftDir, modelId: draftPath) {
             draftFootprintBytes = draftProfile.weightFileSizeBytes
@@ -468,6 +467,7 @@ struct MLXServer: AsyncParsableCommand {
                     print("[SwiftLM] 💾 Memory strategy: SSD STREAMING (page-cache managed, \(physicalBudget / (1024*1024*1024))GB RAM budget, no swap)")
                 } else {
                     Memory.cacheLimit = plan.recommendedCacheLimit
+                    setenv("MLX_MAX_OPS_PER_BUFFER", "50", 1) // Cap buffer size to avoid 5s Metal GPU Watchdog during SSD swap
                     print("[SwiftLM] \(plan.strategy.emoji) Memory strategy: SWAP-ASSISTED (\(String(format: "%.1f", plan.overcommitRatio))× overcommit, cache limited to \(plan.recommendedCacheLimit / (1024*1024))MB)")
                     for w in plan.warnings { print("[SwiftLM]    \(w)") }
                 }
@@ -479,6 +479,7 @@ struct MLXServer: AsyncParsableCommand {
                     print("[SwiftLM] 💾 Memory strategy: SSD STREAMING (page-cache managed, \(physicalBudget / (1024*1024*1024))GB RAM budget, no swap)")
                 } else {
                     Memory.cacheLimit = plan.recommendedCacheLimit
+                    setenv("MLX_MAX_OPS_PER_BUFFER", "50", 1) // Cap buffer size to avoid 5s Metal GPU Watchdog during SSD swap
                     print("[SwiftLM] \(plan.strategy.emoji) Memory strategy: LAYER PARTITIONED (\(plan.recommendedGPULayers)/\(plan.totalLayers) GPU layers, cache limited to \(plan.recommendedCacheLimit / (1024*1024))MB)")
                     for w in plan.warnings { print("[SwiftLM]    \(w)") }
                 }

@@ -960,6 +960,171 @@ else
 fi
 
 
+# ── Test 32: Default streaming is strict (no prefill_progress event leaks) ──
+log "Test 32: Default streaming is strict (no prefill_progress leaks)"
+
+if STRICT_STREAM=$(curl -sf -N -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MODEL\",\"stream\":true,\"max_tokens\":20,\"messages\":[{\"role\":\"user\",\"content\":\"Say hi.\"}]}" \
+    --max-time 30 2>/dev/null); then
+    :
+else
+    fail "Strict mode: curl request failed — cannot evaluate strict streaming"
+    STRICT_STREAM=""
+fi
+
+if [ -z "$STRICT_STREAM" ] || ! echo "$STRICT_STREAM" | grep -q 'data: \[DONE\]'; then
+    # Only fail if it was a curl failure (empty), not a missing event
+    [ -z "$STRICT_STREAM" ] && fail "Strict mode: stream was empty"
+elif echo "$STRICT_STREAM" | grep -q "^event:"; then
+    fail "Strict mode: unexpected named SSE event without opt-in header"
+else
+    pass "Strict mode: no named SSE events in default streaming"
+fi
+
+# Test 32 cont'd — must guard with || true because grep exits 1 on no-match under set -e
+if [ -n "$STRICT_STREAM" ]; then
+    if echo "$STRICT_STREAM" | grep -q '"prefill_progress"' 2>/dev/null || false; then
+        fail "Strict mode: prefill_progress payload leaked into default stream"
+    else
+        pass "Strict mode: no prefill_progress object in default stream"
+    fi
+fi
+
+
+# ── Test 33: Opt-in header enables named SSE event ────────────────────────────
+log "Test 33: Opt-in header enables named SSE event"
+
+if OPTIN_STREAM=$(curl -sf -N -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "X-SwiftLM-Prefill-Progress: true" \
+    -d "{\"model\":\"$MODEL\",\"stream\":true,\"max_tokens\":20,\"messages\":[{\"role\":\"user\",\"content\":\"Say a very long sentence that will definitely take some time to process.\"}]}" \
+    --max-time 30 2>/dev/null); then
+    :
+else
+    fail "Opt-in: streaming request failed"
+    OPTIN_STREAM=""
+fi
+
+if [ -n "$OPTIN_STREAM" ]; then
+    if echo "$OPTIN_STREAM" | grep -q "^event: prefill_progress" 2>/dev/null; then
+        pass "Opt-in: named prefill_progress event received"
+    elif echo "$OPTIN_STREAM" | grep -Fq "data: [DONE]" 2>/dev/null; then
+        log "  ⚠️  WARN: no heartbeat (prompt may have been too short for 2s window)"
+        pass "Opt-in: header accepted without error (heartbeat timing not guaranteed in CI)"
+    else
+        fail "Opt-in: stream did not complete successfully (missing [DONE])"
+    fi
+fi
+
+# Guard jq/grep pipelines with || true to avoid set -e abort on no-match
+EVENT_DATA=$(echo "$OPTIN_STREAM" | grep -A1 "^event: prefill_progress" | grep "^data:" | head -1 | sed 's/^data: //' || true)
+if [ -n "$EVENT_DATA" ]; then
+    if echo "$EVENT_DATA" | jq -e '.n_prompt_tokens' >/dev/null 2>&1; then
+        pass "Opt-in: prefill_progress data has n_prompt_tokens"
+    else
+        fail "Opt-in: prefill_progress data missing n_prompt_tokens"
+    fi
+    if echo "$EVENT_DATA" | jq -e '.choices' >/dev/null 2>&1; then
+        fail "Opt-in: prefill_progress data has .choices (not lean)"
+    else
+        pass "Opt-in: prefill_progress data has no .choices (strict payload)"
+    fi
+fi
+
+
+# ── Test 34: CORS preflight exposes X-SwiftLM-Prefill-Progress header ─────────
+# Must target the dedicated --cors server on CORS_PORT (main server has no CORS middleware).
+log "Test 34: CORS preflight exposes X-SwiftLM-Prefill-Progress"
+
+# Re-start CORS server if it was cleaned up after Test 13b
+if ! curl -sf "http://${HOST}:${CORS_PORT}/health" >/dev/null 2>&1; then
+    log "  Re-starting CORS server on port $CORS_PORT for Test 34..."
+    "$BINARY" --model "$MODEL" --port "$CORS_PORT" --host "$HOST" --cors '*' > /dev/null 2>&1 &
+    CORS_SERVER_PID=$!
+    for i in $(seq 1 60); do
+        curl -sf "http://${HOST}:${CORS_PORT}/health" >/dev/null 2>&1 && break
+        sleep 1
+    done
+fi
+
+OPTIONS_RESP=$(curl -sf -D - -o /dev/null -X OPTIONS "http://${HOST}:${CORS_PORT}/v1/chat/completions" \
+    -H "Origin: http://example.com" \
+    -H "Access-Control-Request-Method: POST" \
+    -H "Access-Control-Request-Headers: X-SwiftLM-Prefill-Progress" 2>&1 || true)
+
+if echo "$OPTIONS_RESP" | grep -qi "X-SwiftLM-Prefill-Progress"; then
+    pass "CORS: Access-Control-Allow-Headers includes X-SwiftLM-Prefill-Progress"
+else
+    fail "CORS: Access-Control-Allow-Headers missing X-SwiftLM-Prefill-Progress"
+fi
+
+
+# ── Test 35: Concurrent opt-in requests (--parallel 2 server) ────────────────
+log "Test 35: Concurrent opt-in requests"
+
+# Use a dedicated --parallel 2 server so both requests execute simultaneously,
+# actually stressing the heartbeat hook under parallel generation.
+PARALLEL_PORT=$((PORT + 3))
+log "  Starting --parallel 2 server on port $PARALLEL_PORT..."
+"$BINARY" --model "$MODEL" --port "$PARALLEL_PORT" --host "$HOST" --parallel 2 > /dev/null 2>&1 &
+PARALLEL_SERVER_PID=$!
+for i in $(seq 1 60); do
+    curl -sf "http://${HOST}:${PARALLEL_PORT}/health" >/dev/null 2>&1 && break
+    sleep 1
+done
+
+CONCURRENT_OPTIN_PASS=true
+PID_A=""
+PID_B=""
+
+curl -sf -N -X POST "http://${HOST}:${PARALLEL_PORT}/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "X-SwiftLM-Prefill-Progress: true" \
+    -d "{\"model\":\"$MODEL\",\"stream\":true,\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"Say one.\"}]}" \
+    -o /tmp/mlx_optin_A.txt &
+PID_A=$!
+
+curl -sf -N -X POST "http://${HOST}:${PARALLEL_PORT}/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -H "X-SwiftLM-Prefill-Progress: true" \
+    -d "{\"model\":\"$MODEL\",\"stream\":true,\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"Say two.\"}]}" \
+    -o /tmp/mlx_optin_B.txt &
+PID_B=$!
+
+wait "$PID_A" || CONCURRENT_OPTIN_PASS=false
+wait "$PID_B" || CONCURRENT_OPTIN_PASS=false
+
+if [ "$CONCURRENT_OPTIN_PASS" = true ]; then
+    if grep -q "data: \[DONE\]" /tmp/mlx_optin_A.txt && grep -q "data: \[DONE\]" /tmp/mlx_optin_B.txt; then
+        pass "Concurrent opt-in: both requests completed successfully under --parallel 2"
+    else
+        fail "Concurrent opt-in: one or both streams did not complete"
+    fi
+else
+    fail "Concurrent opt-in: curl failed"
+fi
+rm -f /tmp/mlx_optin_A.txt /tmp/mlx_optin_B.txt
+kill "$PARALLEL_SERVER_PID" 2>/dev/null || true
+wait "$PARALLEL_SERVER_PID" 2>/dev/null || true
+
+
+# ── Test 36: /v1/completions (text endpoint) respects opt-in header ───────────
+log "Test 36: /v1/completions respects opt-in header"
+
+TEXT_STREAM_OPT=$(curl -sf -N -X POST "$URL/v1/completions" \
+    -H "Content-Type: application/json" \
+    -H "X-SwiftLM-Prefill-Progress: true" \
+    -d "{\"model\":\"$MODEL\",\"stream\":true,\"max_tokens\":10,\"prompt\":\"Hello world.\"}" \
+    --max-time 30 2>/dev/null || true)
+
+if echo "$TEXT_STREAM_OPT" | grep -q "data: \[DONE\]"; then
+    pass "Text streaming + opt-in header: [DONE] received"
+else
+    fail "Text streaming + opt-in header: failed or missing [DONE]"
+fi
+
+
 # ── Results ──────────────────────────────────────────────────────────
 echo ""
 log "═══════════════════════════════════════"

@@ -11,6 +11,7 @@
 
 import ArgumentParser
 import CoreImage
+import DFlash
 import Foundation
 import HTTPTypes
 import Hummingbird
@@ -18,6 +19,7 @@ import Hub
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MLXNN
 import MLXVLM
 import MLXInferenceCore
 import Tokenizers
@@ -272,7 +274,34 @@ struct MLXServer: AsyncParsableCommand {
     @Option(name: .long, help: "Number of draft tokens per speculation round (default: 4)")
     var numDraftTokens: Int = 4
 
+    @Flag(name: .long, help: "Enable DFlash block-diffusion speculative decoding. Requires a DFlash draft model (auto-resolved or specified via --draft-model).")
+    var dflash: Bool = false
+
+    @Option(name: .long, help: "DFlash block size (number of tokens per draft block). Default: use draft model's configured block_size.")
+    var dflashBlockSize: Int?
+
     mutating func run() async throws {
+        // Raise the open-file limit: large sharded models (e.g. Kimi K2.5, 182 safetensor
+        // shards) + draft model + metallib + dylibs can exhaust the default macOS FD limit of 256.
+        var rl = rlimit()
+        getrlimit(RLIMIT_NOFILE, &rl)
+        if rl.rlim_cur < 4096 {
+            rl.rlim_cur = min(4096, rl.rlim_max)
+            setrlimit(RLIMIT_NOFILE, &rl)
+        }
+
+        // Cap Metal command buffer size BEFORE any MLX operation to prevent the
+        // 5-second Apple GPU Watchdog from killing processes under swap pressure.
+        // This env var must be set before MLX's Metal backend initializes.
+        // Value 50 splits large computation graphs into ~1-layer chunks so macOS
+        // can page in weights incrementally without exceeding the watchdog timeout.
+        if self.draftModel != nil || self.streamExperts {
+            setenv("MLX_MAX_OPS_PER_BUFFER", "50", 1)
+        }
+
+        // Register SwiftLM-owned DFlash model types before any model loading.
+        await registerDFlashModelTypes()
+
         print("[SwiftLM] Loading model: \(model)")
         let modelId = model
 
@@ -297,10 +326,55 @@ struct MLXServer: AsyncParsableCommand {
             modelConfig.lazyLoad = true
         }
 
+        // ── Strategy: --stream-experts + --draft-model ───────────────────────────
+        // README.md notes speculative decoding is "counterproductive" for SSD-streaming
+        // MoE at the default 4 draft tokens: the verify pass sends N+1 positions each
+        // routing to *different* experts, scaling SSD I/O by the union of all expert
+        // selections across every position simultaneously.
+        //
+        // However, with numDraftTokens = 1, the verify pass sends only 2 positions —
+        // minimal fan-out. If the draft acceptance rate is ≥ 50%, the draft model's
+        // speed advantage (~73 tok/s) still yields net positive throughput despite the
+        // 2× SSD I/O overhead, especially on models where the draft hit rate is high.
+        //
+        // Strategy: auto-cap numDraftTokens to 1 and print a performance advisory.
+        // This keeps the combination functional while minimising the fan-out penalty.
+        // Users who understand the tradeoff can still benefit from the draft model.
+        if self.streamExperts, self.draftModel != nil {
+            if self.numDraftTokens > 1 {
+                print("[SwiftLM] ⚠️  SSD streaming + draft model: auto-capping --num-draft-tokens to 1")
+                print("[SwiftLM]    With N>1 draft tokens the verify pass fans expert I/O across N+1 SSD")
+                print("[SwiftLM]    positions simultaneously, which regresses throughput vs no draft model.")
+                print("[SwiftLM]    At 1 draft token (2 positions) the fan-out is minimal and net positive")
+                print("[SwiftLM]    if draft acceptance rate ≥ 50%.")
+                print("[SwiftLM]    ℹ️  For best throughput: use --stream-experts alone (no draft model).")
+                self.numDraftTokens = 1
+            } else {
+                print("[SwiftLM] ℹ️  SSD streaming + draft model (1 token/round): minimal fan-out mode active.")
+            }
+        }
+
         // ── Pre-load profiling ──
         // Resolve model directory for profiling (checks HuggingFace cache)
         let modelDirectory = resolveModelDirectory(modelId: modelId)
         
+        // ── Fix #72: Compute draft model footprint ONCE (Copilot review) ──────
+        // Resolved before the streamExperts block so the exact byte count can be
+        // reused for the early cap, both strategy branches, and logging without
+        // repeating the filesystem walk.  Use weightFileSizeBytes (exact bytes)
+        // instead of weightMemoryGB * 1_073_741_824 to avoid the ~7% GiB/GB
+        // mismatch flagged in Copilot review (weightMemoryGB = bytes / 1e9, not /2^30).
+        let draftFootprintBytes: Int
+        if let draftPath = self.draftModel,
+           let draftDir = resolveModelDirectory(modelId: draftPath),
+           let draftProfile = ModelProfiler.profile(modelDirectory: draftDir, modelId: draftPath) {
+            draftFootprintBytes = draftProfile.weightFileSizeBytes
+        } else {
+            draftFootprintBytes = 0
+        }
+
+        var mainModelProfile: ModelProfile? = nil
+
         if self.streamExperts, let modelDir = modelDirectory {
             setenv("EXPERIMENTAL_SSD_STREAM", modelDir.path, 1)
             // Activate the modern Swift ExpertStreamingConfig so Load.swift can:
@@ -314,14 +388,72 @@ struct MLXServer: AsyncParsableCommand {
             // Cap Metal command buffer size to avoid the 5s Apple GPU Watchdog.
             setenv("MLX_MAX_OPS_PER_BUFFER", "50", 1)
             print("[SwiftLM] Enabled Async SSD Streaming on directory: \(modelDir.lastPathComponent)")
+
+            // ── Fix #72 (inference-time): Context-aware memoryLimit ────────────
+            // The 200 GB sentinel bypasses MLX eval_impl's spin-wait loop and is
+            // safe for SSD streaming alone, because only one model's expert pages
+            // are demanded at a time.
+            //
+            // With --draft-model, speculative decoding alternates between the draft
+            // model and the main model in tight succession.  If combined weights
+            // exceed physical RAM, both models' pages thrash the SSD page cache
+            // simultaneously, and the 200 GB sentinel lets MLX demand 40+ GB
+            // without any back-pressure — swapping out to disk aggressively.
+            //
+            // Fix: when the combined footprint exceeds 70% of physical RAM, lower
+            // memoryLimit to physicalRAM × 1.1.  MLX will then hit its hard limit
+            // sooner and begin evicting old expert pages more aggressively instead
+            // of extending into swap.
+            let system = ModelProfiler.systemProfile()
+            if draftFootprintBytes > 0 {
+                print("[SwiftLM] 📦 Draft model footprint: \(String(format: "%.2f", Double(draftFootprintBytes) / 1e9))GB reserved from SSD budget")
+            }
+            Memory.cacheLimit = computeSSDMemoryBudget(totalRAMBytes: system.totalRAMBytes, draftWeightBytes: draftFootprintBytes)
+
+            // Determine safe memoryLimit sentinel
+            mainModelProfile = ModelProfiler.profile(modelDirectory: modelDir, modelId: modelId)
+            let mainFootprintBytes = mainModelProfile?.weightFileSizeBytes ?? 0
+            let combinedFootprint = mainFootprintBytes + draftFootprintBytes
+            let physicalRAM = Int(system.totalRAMBytes)
+            let combinedExceedsRAM = combinedFootprint > Int(Double(physicalRAM) * 0.70)
+
+            if combinedExceedsRAM && draftFootprintBytes > 0 {
+                // Combined model weights exceed 70% of physical RAM.
+                // Speculative decoding causes both models' pages to be demanded
+                // simultaneously during draft+verify cycles, which will thrash
+                // the SSD page cache and trigger heavy swap.
+                // Use a tight memoryLimit so MLX evicts pages rather than swapping.
+                let tightLimit = Int(Double(physicalRAM) * 1.1)
+                Memory.memoryLimit = tightLimit
+                print("[SwiftLM] ⚠️  SSD + draft-model RAM pressure warning:")
+                print("[SwiftLM]    Main model: \(String(format: "%.1f", Double(mainFootprintBytes) / 1e9))GB  Draft: \(String(format: "%.1f", Double(draftFootprintBytes) / 1e9))GB  Combined: \(String(format: "%.1f", Double(combinedFootprint) / 1e9))GB  Physical RAM: \(String(format: "%.1f", Double(physicalRAM) / 1e9))GB")
+                print("[SwiftLM]    Speculative decoding alternates both models' forward passes.")
+                print("[SwiftLM]    On this machine the combined weight exceeds physical RAM,")
+                print("[SwiftLM]    causing page-cache thrashing and swap during inference.")
+                print("[SwiftLM]    → Recommendation: remove --draft-model on this machine,")
+                print("[SwiftLM]      or use a smaller draft model whose weights fit in")
+                print("[SwiftLM]      remaining RAM after the main model's page budget (\(Memory.cacheLimit / (1024*1024*1024))GB).")
+                print("[SwiftLM]    Memory limit set to \(tightLimit / (1024*1024*1024))GB (tight cap for MLX eviction pressure)")
+            } else {
+                // No draft model, or combined fits in RAM — use the standard sentinel
+                // to bypass MLX eval_impl's spin-wait loop safely.
+                Memory.memoryLimit = 200 * 1024 * 1024 * 1024 // 200 GB sentinel
+            }
+        } else if self.streamExperts {
+            // modelDirectory is nil — model not yet downloaded (first-run).
+            // Still apply the SSD memory cap so the download itself is bounded.
+            let system = ModelProfiler.systemProfile()
+            Memory.cacheLimit = computeSSDMemoryBudget(totalRAMBytes: system.totalRAMBytes, draftWeightBytes: draftFootprintBytes)
+            Memory.memoryLimit = 200 * 1024 * 1024 * 1024 // 200 GB sentinel
         }
         
         var partitionPlan: PartitionPlan?
-        if let modelDir = modelDirectory,
-           let profile = ModelProfiler.profile(modelDirectory: modelDir, modelId: modelId) {
+        if let modelDir = modelDirectory {
+           let profile = mainModelProfile ?? ModelProfiler.profile(modelDirectory: modelDir, modelId: modelId)
+           if let profile = profile {
             let system = ModelProfiler.systemProfile()
             let contextSize = self.ctxSize ?? 4096
-            let plan = ModelProfiler.plan(model: profile, system: system, contextSize: contextSize)
+            let plan = ModelProfiler.plan(model: profile, system: system, contextSize: contextSize, draftWeightBytes: draftFootprintBytes)
             partitionPlan = plan
 
             // --info mode: print report and exit
@@ -338,9 +470,9 @@ struct MLXServer: AsyncParsableCommand {
                 if self.streamExperts {
                     // SSD Streaming: expert weights are mmap'd from SSD via the OS page cache.
                     // No swap involved — the page cache evicts stale expert pages cleanly.
-                    let physicalBudget = Int(Double(system.totalRAMBytes) * 0.85) - (4 * 1024 * 1024 * 1024)
+                    // draftFootprintBytes pre-computed once above (Copilot review).
+                    let physicalBudget = computeSSDMemoryBudget(totalRAMBytes: system.totalRAMBytes, draftWeightBytes: draftFootprintBytes)
                     Memory.cacheLimit = physicalBudget
-                    Memory.memoryLimit = 200 * 1024 * 1024 * 1024 // 200GB sentinel to bypass MLX eval_impl spin loop
                     print("[SwiftLM] 💾 Memory strategy: SSD STREAMING (page-cache managed, \(physicalBudget / (1024*1024*1024))GB RAM budget, no swap)")
                 } else {
                     Memory.cacheLimit = plan.recommendedCacheLimit
@@ -349,9 +481,9 @@ struct MLXServer: AsyncParsableCommand {
                 }
             case .layerPartitioned:
                 if self.streamExperts {
-                    let physicalBudget = Int(Double(system.totalRAMBytes) * 0.85) - (4 * 1024 * 1024 * 1024)
+                    // draftFootprintBytes pre-computed once above (Copilot review).
+                    let physicalBudget = computeSSDMemoryBudget(totalRAMBytes: system.totalRAMBytes, draftWeightBytes: draftFootprintBytes)
                     Memory.cacheLimit = physicalBudget
-                    Memory.memoryLimit = 200 * 1024 * 1024 * 1024 // 200GB sentinel to bypass MLX eval_impl spin loop
                     print("[SwiftLM] 💾 Memory strategy: SSD STREAMING (page-cache managed, \(physicalBudget / (1024*1024*1024))GB RAM budget, no swap)")
                 } else {
                     Memory.cacheLimit = plan.recommendedCacheLimit
@@ -363,6 +495,7 @@ struct MLXServer: AsyncParsableCommand {
                 print("[SwiftLM] \(plan.strategy.emoji) WARNING: Model is \(String(format: "%.1f", plan.overcommitRatio))× system RAM. Loading will be extremely slow.")
                 for w in plan.warnings { print("[SwiftLM]    \(w)") }
             }
+           }
         } else if self.info {
             print("[SwiftLM] Model not yet downloaded. Run without --info to download first, or provide a local path.")
             return
@@ -396,6 +529,15 @@ struct MLXServer: AsyncParsableCommand {
             }
         }
 
+        let cacheRoot = URL.applicationSupportDirectory
+            .appendingPathComponent("MLX", isDirectory: true)
+            .appendingPathComponent("HuggingFace", isDirectory: true)
+        let hub = HubApi(downloadBase: cacheRoot)
+        let downloader = HubDownloader(hub: hub)
+        let architecture = try await ModelArchitectureProbe.inspect(
+            configuration: modelConfig,
+            downloader: downloader
+        )
         let isVision = self.vision
         let container: ModelContainer
         
@@ -407,12 +549,8 @@ struct MLXServer: AsyncParsableCommand {
         let tracker = ProgressTracker(modelId: resolvedModelId)
         
         let isAudio = self.audio
-        let cacheRoot = URL.applicationSupportDirectory
-            .appendingPathComponent("MLX", isDirectory: true)
-            .appendingPathComponent("HuggingFace", isDirectory: true)
         if isVision && isAudio {
             print("[SwiftLM] Loading Omni-Language Model (Text + Vision + Audio)...")
-            let downloader = HubDownloader(hub: HubApi(downloadBase: cacheRoot))
             container = try await OmniModelFactory.shared.loadContainer(
                 from: downloader,
                 using: TransformersTokenizerLoader(),
@@ -422,7 +560,6 @@ struct MLXServer: AsyncParsableCommand {
             }
         } else if isVision {
             print("[SwiftLM] Loading VLM (vision-language model)...")
-            let downloader = HubDownloader(hub: HubApi(downloadBase: cacheRoot))
             container = try await VLMModelFactory.shared.loadContainer(
                 from: downloader,
                 using: TransformersTokenizerLoader(),
@@ -432,7 +569,6 @@ struct MLXServer: AsyncParsableCommand {
             }
         } else if isAudio {
             print("[SwiftLM] Loading ALM (audio-language model)...")
-            let downloader = HubDownloader(hub: HubApi(downloadBase: cacheRoot))
             // Use OmniModelFactory (VLM-backed) so Gemma4's audio tower is loaded
             // and the native prepareForMultimodal path extracts real mel features.
             container = try await OmniModelFactory.shared.loadContainer(
@@ -444,7 +580,6 @@ struct MLXServer: AsyncParsableCommand {
             }
         } else {
             print("[SwiftLM] Loading LLM (large language model)...")
-            let downloader = HubDownloader(hub: HubApi(downloadBase: cacheRoot))
             container = try await LLMModelFactory.shared.loadContainer(
                 from: downloader,
                 using: TransformersTokenizerLoader(),
@@ -456,10 +591,22 @@ struct MLXServer: AsyncParsableCommand {
 
         print("[SwiftLM] Loaded model configuration. Inferred tool call format: \(String(describing: await container.configuration.toolCallFormat))")
 
+        // ── Check if target model supports DFlash ──
+        let dflashTargetModel: (any DFlashTargetModel)? = await container.perform { context -> (any DFlashTargetModel)? in
+            context.model as? any DFlashTargetModel
+        }
+        if self.dflash {
+            if dflashTargetModel != nil {
+                print("[SwiftLM] DFlash: target model supports DFlashTargetModel")
+            } else {
+                print("[SwiftLM] ⚠️  DFlash enabled but target model does NOT conform to DFlashTargetModel")
+            }
+        }
+
         // ── Load draft model for speculative decoding ──
         let draftModelRef: DraftModelRef?
         let numDraftTokensConfig = self.numDraftTokens
-        if let draftModelPath = self.draftModel {
+        if let draftModelPath = self.draftModel, !self.dflash {
             print("[SwiftLM] Loading draft model for speculative decoding: \(draftModelPath)")
             var draftConfig: ModelConfiguration
             let draftFM = FileManager.default
@@ -474,6 +621,11 @@ struct MLXServer: AsyncParsableCommand {
             } else {
                 draftConfig = ModelConfiguration(id: draftModelPath)
             }
+            // Fix #72: mirror lazyLoad so the draft model's weights are mmap'd
+            // (not eagerly paged into unified RAM) when SSD streaming is active.
+            if self.streamExperts {
+                draftConfig.lazyLoad = true
+            }
             let draftDownloader = HubDownloader(hub: HubApi(downloadBase: cacheRoot))
             let draftContainer = try await LLMModelFactory.shared.loadContainer(
                 from: draftDownloader,
@@ -484,8 +636,69 @@ struct MLXServer: AsyncParsableCommand {
             }
             draftModelRef = await draftContainer.extractDraftModel()
             print("[SwiftLM] Draft model loaded successfully (\(numDraftTokensConfig) tokens/round)")
+            print("[SwiftLM] Using speculative decoding: \(draftModelPath) → \(modelId) (\(numDraftTokensConfig) draft tokens/round)")
         } else {
             draftModelRef = nil
+        }
+
+        // ── Load DFlash draft model for block-diffusion speculative decoding ──
+        let dflashModel: DFlashDraftModel?
+        let dflashBlockSizeConfig = self.dflashBlockSize
+        let dflashConfig = DFlashDraftConfiguration.self
+        if self.dflash {
+            // Resolve draft model reference
+            let resolvedDraftRef: String
+            if let explicit = self.draftModel {
+                resolvedDraftRef = explicit
+            } else if let autoRef = DFlashDraftRegistry.resolveDraftRef(modelRef: modelId) {
+                resolvedDraftRef = autoRef
+                print("[SwiftLM] DFlash: auto-resolved draft model → \(autoRef)")
+            } else {
+                print("[SwiftLM] ⚠️  DFlash enabled but no draft model found for '\(modelId)'. Use --draft-model to specify one.")
+                resolvedDraftRef = ""
+            }
+
+            if !resolvedDraftRef.isEmpty {
+                print("[SwiftLM] Loading DFlash draft model: \(resolvedDraftRef)")
+                let draftDir = resolveModelDirectory(modelId: resolvedDraftRef)
+                if let dir = draftDir {
+                    do {
+                        let configURL = dir.appendingPathComponent("config.json")
+                        let data = try Data(contentsOf: configURL)
+                        let config = try JSONDecoder().decode(dflashConfig, from: data)
+                        let model = DFlashDraftModel(config)
+
+                        // Load weights
+                        let weightURL = dir.appendingPathComponent("weights.safetensors")
+                        let ntURL = dir.appendingPathComponent("model.safetensors")
+                        let actualWeightURL = FileManager.default.fileExists(atPath: weightURL.path) ? weightURL : ntURL
+
+                        let weights = try loadArrays(url: actualWeightURL)
+                        let sanitized = model.sanitize(weights: weights)
+                        let parameters = ModuleParameters.unflattened(sanitized)
+                        try model.update(parameters: parameters, verify: .none)
+
+                        dflashModel = model
+                        // Register DFlashKernels as the global provider
+                        // so Qwen35GatedDeltaNet can use tape-recording forward
+                        DFlashKernelRegistry.provider = DFlashKernels.shared
+                        DFlashDumper.setup()
+                        print("[SwiftLM] DFlash draft model loaded (block_size=\(model.blockSize), \(model.targetLayerIDs.count) target layers, mask_token=\(model.maskTokenID))")
+                        print("[SwiftLM] Draft model loaded successfully (\(model.blockSize) block size, DFlash mode)")
+                        print("[SwiftLM] Using speculative decoding: \(resolvedDraftRef) → \(modelId) (DFlash block-diffusion)")
+                    } catch {
+                        print("[SwiftLM] ⚠️  Failed to load DFlash draft model: \(error)")
+                        dflashModel = nil
+                    }
+                } else {
+                    print("[SwiftLM] ⚠️  DFlash draft model not found locally: \(resolvedDraftRef). Download it first with: hf download \(resolvedDraftRef)")
+                    dflashModel = nil
+                }
+            } else {
+                dflashModel = nil
+            }
+        } else {
+            dflashModel = nil
         }
 
 
@@ -659,8 +872,10 @@ struct MLXServer: AsyncParsableCommand {
             do {
                 let bodyData = try await collectBody(request)
                 return try await handleChatCompletion(
-                    bodyData: bodyData, config: config, container: container, semaphore: semaphore, stats: stats, promptCache: promptCache,
-                    draftModelRef: draftModelRef, numDraftTokens: numDraftTokensConfig
+                    request: request, bodyData: bodyData, config: config, container: container, semaphore: semaphore, stats: stats, promptCache: promptCache,
+                    draftModelRef: draftModelRef, numDraftTokens: numDraftTokensConfig,
+                    dflashModel: dflashModel, dflashBlockSize: dflashBlockSizeConfig,
+                    dflashTargetModel: dflashTargetModel
                 )
             } catch {
                 let errMsg = String(describing: error).replacingOccurrences(of: "\"", with: "'")
@@ -680,7 +895,7 @@ struct MLXServer: AsyncParsableCommand {
             do {
                 let bodyData = try await collectBody(request)
                 return try await handleTextCompletion(
-                    bodyData: bodyData, config: config, container: container, semaphore: semaphore, stats: stats
+                    request: request, bodyData: bodyData, config: config, container: container, semaphore: semaphore, stats: stats
                 )
             } catch {
                 let errMsg = String(describing: error).replacingOccurrences(of: "\"", with: "'")
@@ -831,6 +1046,24 @@ struct ServerConfig: Sendable {
     let turboKV: Bool
 }
 
+// ── SSD Memory Budget ────────────────────────────────────────────────────────
+
+/// Compute the page-cache budget (bytes) for SSD streaming mode.
+///
+/// Formula: `totalRAM × 0.85 − osHeadroom − draftWeightBytes`, floored at 2 GB.
+///
+/// - Parameters:
+///   - totalRAMBytes: Physical RAM reported by the OS (e.g. `system.totalRAMBytes`).
+///   - draftWeightBytes: Weight size (bytes) of the draft model, or 0 if none.
+///     Subtracted so the draft model's resident pages don't push the main model's
+///     page cache over the physical limit and trigger swap (Issue #72).
+/// - Returns: The recommended `Memory.cacheLimit` value in bytes.
+func computeSSDMemoryBudget(totalRAMBytes: UInt64, draftWeightBytes: Int = 0) -> Int {
+    let osHeadroom = 4 * 1024 * 1024 * 1024  // 4 GB for OS + system processes
+    let raw = Int(Double(totalRAMBytes) * 0.85) - osHeadroom - draftWeightBytes
+    return max(raw, 2 * 1024 * 1024 * 1024)  // floor at 2 GB
+}
+
 // ── Model Directory Resolution ───────────────────────────────────────────────
 
 /// Resolve a model ID to its local directory (if already downloaded).
@@ -925,7 +1158,7 @@ actor ServerStats {
     }
 }
 
-// ── Prompt Cache ─────────────────────────────────────────────────────────────
+
 
 actor PromptCache {
     struct CachedState {
@@ -944,6 +1177,9 @@ actor PromptCache {
     /// If not materialized now, those lazy references point to the live cache tensors
     /// which get overwritten by subsequent requests, causing stale data / SIGTRAP on restore.
     func save(tokens: [Int], cache: [KVCache]) {
+        if cache.contains(where: { $0 is MambaCache }) {
+            return
+        }
         let states = cache.map { $0.state }
         let metaStates = cache.map { $0.metaState }
         // Materialize all lazy MLX arrays so they survive cache mutations
@@ -958,6 +1194,14 @@ actor PromptCache {
     /// Restores matched KV state, trims any excess — mirrors llama-server behaviour.
     /// Returns the number of matched tokens, or nil on a complete miss.
     func restore(newTokens: [Int], into cache: [KVCache]) -> Int? {
+        // MambaCache/RNN states cannot be arbitrarily rolled back or safely saved
+        // after the fact without exact sequence-boundary synchronization.
+        // Disable prompt caching entirely for hybrid models (e.g. Qwen3Next).
+        if cache.contains(where: { $0 is MambaCache }) {
+            misses += 1
+            return nil
+        }
+
         guard let cached, !cached.tokens.isEmpty else {
             misses += 1
             return nil
@@ -1018,6 +1262,7 @@ func collectBody(_ request: Request) async throws -> Data {
 // ── Chat Completions Handler ─────────────────────────────────────────────────
 
 func handleChatCompletion(
+    request: Request,
     bodyData: Data,
     config: ServerConfig,
     container: ModelContainer,
@@ -1025,11 +1270,15 @@ func handleChatCompletion(
     stats: ServerStats,
     promptCache: PromptCache,
     draftModelRef: DraftModelRef? = nil,
-    numDraftTokens: Int = 4
+    numDraftTokens: Int = 4,
+    dflashModel: DFlashDraftModel? = nil,
+    dflashBlockSize: Int? = nil,
+    dflashTargetModel: (any DFlashTargetModel)? = nil
 ) async throws -> Response {
     let chatReq = try JSONDecoder().decode(ChatCompletionRequest.self, from: bodyData)
     let isStream = chatReq.stream ?? false
     let jsonMode = chatReq.responseFormat?.type == "json_object"
+    let emitPrefillProgress = prefillProgressEnabled(in: request)
 
     // ── Merge per-request overrides with CLI defaults ──
     let tokenLimit = chatReq.maxTokens ?? config.maxTokens
@@ -1046,9 +1295,20 @@ func handleChatCompletion(
         // These are accepted but may not affect generation if MLX doesn't support them
     }
 
+    // ── Validate kv_bits: only nil, 4, and 8 are supported ──
+    if let kb = chatReq.kvBits, kb != 4 && kb != 8 {
+        let errBody = "{\"error\":{\"message\":\"Invalid kv_bits value \(kb). Supported values are 4 and 8.\",\"type\":\"invalid_request_error\",\"code\":\"invalid_kv_bits\"}}"
+        return Response(
+            status: .badRequest,
+            headers: jsonHeaders(),
+            body: .init(byteBuffer: ByteBuffer(string: errBody))
+        )
+    }
+
     let params = GenerateParameters(
         maxTokens: tokenLimit,
         maxKVSize: config.ctxSize,
+        kvBits: chatReq.kvBits,
         temperature: temperature,
         topP: topP,
         topK: topK,
@@ -1125,7 +1385,7 @@ func handleChatCompletion(
 
     // Pass enable_thinking to the Jinja chat template via additionalContext.
     // Precedence: top-level request > per-request chat_template_kwargs > server --thinking flag
-    let enableThinking: Bool
+    var enableThinking: Bool
     if let explicitTopLevel = chatReq.enableThinking {
         enableThinking = explicitTopLevel
     } else if let kwargs = chatReq.chatTemplateKwargs, let perRequest = kwargs["enable_thinking"] {
@@ -1133,7 +1393,36 @@ func handleChatCompletion(
     } else {
         enableThinking = config.thinking  // fall back to server --thinking flag
     }
-    let templateContext: [String: any Sendable]? = enableThinking ? nil : ["enable_thinking": false]
+
+    // Workaround for Gemma-4 Tool-Call bug (Resolves https://github.com/SharpAI/SwiftLM/issues/69)
+    // If tools are present, the Gemma-4 Jinja template appends an anti-thinking prefix
+    // (`<|channel>thought\n<channel|>`) when enable_thinking=false. This forcibly suppresses
+    // the reasoning channel, flattening the first-token output distribution at the `<|tool_call>`
+    // vs `text` decision point, resulting in complete failure (garbage tokens, Korean repeats,
+    // or ignoring tools entirely) on vague requests.
+    //
+    // Fix: Unconditionally enable the thinking channel when tools are provided, giving the
+    // Gemma-4 router time to process the system prompt before deciding to emit a tool_call.
+    //
+    // Coverage details:
+    // - Tested Model: `mlx-community/gemma-4-26b-a4b-it-4bit`
+    // - Verification: Verified via `run_benchmark.sh` (Test 8) using dynamic `tool_call` regression mapping.
+    //                 The test covers vague query fallback (graceful TEXT handling bypassing degeneration)
+    //                 and explicit query execution (driven via structured System Prompt conditioning).
+    // - Known Limitations: While this logic repairs expected 4-bit decoding structures, evaluating at
+    //                    zero-temperature (`temp=0.0`) without active repetition penalties can inherently 
+    //                    induce repeating loop failure vectors beyond the purview of this fix.
+    if chatReq.enableThinking == nil,
+       chatReq.chatTemplateKwargs?["enable_thinking"] == nil,
+       toolSpecs?.isEmpty == false,
+       await container.configuration.toolCallFormat == .gemma4
+    {
+        enableThinking = true
+    }
+
+    // The Jinja template evaluates `not enable_thinking | default(false)`. If we pass nil instead of
+    // true, it evaluates to false and still breaks. We MUST explicitly pass the boolean.
+    let templateContext: [String: any Sendable] = ["enable_thinking": enableThinking]
     let userInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: templateContext)
     print("[Server Debug] Created UserInput with \(userInput.images.count) images and \(userInput.audio.count) audio inputs.")
     let lmInput = try await container.prepare(input: userInput)
@@ -1147,7 +1436,69 @@ func handleChatCompletion(
     fflush(stdout)
     let prefillStart = Date()
 
-    // ── Cache-aware generation ──
+    // ── DFlash block-diffusion speculative decoding ──
+    // When --dflash is enabled and both DFlash draft model and target model conform
+    // to DFlashTargetModel, we use DFlashRuntime.generate instead of the standard path.
+    if let dflashDraft = dflashModel, let targetModel = dflashTargetModel {
+        print("[SwiftLM] ⚡ DFlash block-diffusion speculative decoding active")
+        print("[SwiftLM] Using speculative decoding: DFlash block-diffusion mode active")
+        fflush(stdout)
+        // Convert DFlashEvent stream to Generation stream with proper streaming detokenizer
+        let dflashTokenizer = await container.tokenizer
+        let dflashStream = DFlashRuntime.generate(
+            targetModel: targetModel,
+            draftModel: dflashDraft,
+            promptTokens: promptTokens,
+            maxNewTokens: tokenLimit,
+            blockTokens: dflashBlockSize
+        )
+
+        // Use a class wrapper so the detokenizer can be mutated inside the closure
+        final class DetokenizerBox: @unchecked Sendable {
+            var detokenizer: NaiveStreamingDetokenizer
+            init(_ d: NaiveStreamingDetokenizer) { self.detokenizer = d }
+        }
+        let box = DetokenizerBox(NaiveStreamingDetokenizer(tokenizer: dflashTokenizer))
+
+        let genStream = AsyncStream<Generation> { continuation in
+            Task {
+                for await event in dflashStream {
+                    switch event {
+                    case .token(let tokenID, _, _, _):
+                        box.detokenizer.append(token: tokenID)
+                        if let chunk = box.detokenizer.next() {
+                            continuation.yield(.chunk(chunk, tokenId: tokenID))
+                        }
+                    case .prefill, .prefillProgress:
+                        break
+                    case .summary(let summary):
+                        print("[SwiftLM] DFlash summary: \(summary.generationTokens) tokens, \(String(format: "%.1f", summary.tokensPerSecond)) tok/s, acceptance=\(String(format: "%.1f%%", summary.acceptanceRatio * 100)), \(summary.cyclesCompleted) cycles")
+                    }
+                }
+                continuation.finish()
+            }
+        }
+
+        let modelId = config.modelId
+        if isStream {
+            return handleChatStreaming(
+                stream: genStream, modelId: modelId, stopSequences: stopSequences,
+                includeUsage: includeUsage, promptTokenCount: promptTokenCount,
+                enableThinking: enableThinking, jsonMode: jsonMode, semaphore: semaphore,
+                stats: stats, genStart: genStart, prefillStart: prefillStart,
+                emitPrefillProgress: false, onPrefillDone: nil
+            )
+        } else {
+            return try await handleChatNonStreaming(
+                stream: genStream, modelId: modelId, stopSequences: stopSequences,
+                promptTokenCount: promptTokenCount, enableThinking: enableThinking,
+                jsonMode: jsonMode, semaphore: semaphore,
+                stats: stats, genStart: genStart, prefillStart: prefillStart, onPrefillDone: nil
+            )
+        }
+    }
+
+    // ── Cache-aware generation (standard path) ──
     let (stream, onPrefillDone) = try await container.perform { context -> (AsyncStream<Generation>, (() async -> Void)?) in
         let cache = context.model.newCache(parameters: params)
 
@@ -1169,9 +1520,13 @@ func handleChatCompletion(
         // raw <|image|>/<|audio|> token embeddings instead of the projected features.
         let isMultimodalRequest = lmInput.image != nil || lmInput.audio != nil
 
-        // Try to restore via token-by-token prefix match (llama-server style)
+        // Try to restore via token-by-token prefix match (llama-server style).
+        // Skip for quantized-KV requests: the prompt cache stores KV state produced
+        // with KVCacheSimple; restoring it into a QuantizedKVCache (or vice-versa)
+        // is unsafe and produces incorrect results or runtime failures.
+        let skipPromptCache = isMultimodalRequest || params.kvBits != nil
         var stream: AsyncStream<Generation>
-        if !isMultimodalRequest, let cachedCount = await promptCache.restore(newTokens: promptTokens, into: cache) {
+        if !skipPromptCache, let cachedCount = await promptCache.restore(newTokens: promptTokens, into: cache) {
             // Cache hit: KV state is pre-populated up to cachedCount tokens.
             // Only compute the remaining (new) tokens.
             var startIndex = cachedCount
@@ -1186,13 +1541,6 @@ func handleChatCompletion(
             let trimmedInput = LMInput(tokens: remainingTokens)
             stream = try MLXLMCommon.generate(
                 input: trimmedInput, cache: cache, parameters: params, context: context
-            )
-        } else if let draftRef = draftModelRef {
-            // Speculative decoding path: draft model generates candidates, main model verifies
-            print("[SwiftLM] Using speculative decoding (\(numDraftTokens) draft tokens/round)")
-            stream = try MLXLMCommon.generate(
-                input: lmInput, cache: cache, parameters: params, context: context,
-                draftModel: draftRef.model, numDraftTokens: numDraftTokens
             )
         } else {
             // Cache miss: process the full prompt.
@@ -1220,6 +1568,10 @@ func handleChatCompletion(
         let onPrefillDone: (() async -> Void)? = {
             if turboHasCompressed {
                 print("[SwiftLM] 🧠 Skipping prompt cache save — TurboQuant has compressed \(cache.compactMap { ($0 as? KVCacheSimple)?.compressedOffset }.max() ?? 0) tokens. Saving would decode ~37 GB back to fp16.")
+            } else if params.kvBits != nil {
+                // kv_bits is set: the cache contains QuantizedKVCache layers whose token
+                // format is incompatible with the FP16 KVCacheSimple format expected by
+                // promptCache.save. Skip saving to prevent unsafe mixed-format restores.
             } else {
                 await promptCache.save(tokens: promptTokens, cache: cache)
             }
@@ -1234,7 +1586,8 @@ func handleChatCompletion(
             stream: stream, modelId: modelId, stopSequences: stopSequences,
             includeUsage: includeUsage, promptTokenCount: promptTokenCount,
             enableThinking: enableThinking, jsonMode: jsonMode, semaphore: semaphore,
-            stats: stats, genStart: genStart, prefillStart: prefillStart, onPrefillDone: onPrefillDone
+            stats: stats, genStart: genStart, prefillStart: prefillStart,
+            emitPrefillProgress: emitPrefillProgress, onPrefillDone: onPrefillDone
         )
     } else {
         return try await handleChatNonStreaming(
@@ -1267,15 +1620,13 @@ struct ThinkingStateTracker {
         while !buffer.isEmpty {
             switch phase {
             case .responding:
-                let startRange = buffer.range(of: "<thinking>") ?? buffer.range(of: "<think>")
+                let startRange = buffer.range(of: "<thinking>") ?? buffer.range(of: "<think>") ?? buffer.range(of: "<|channel>thought\n") ?? buffer.range(of: "<|channel>thought")
                 if let range = startRange {
                     // Flush text before the tag as response content
                     content += String(buffer[buffer.startIndex..<range.lowerBound])
                     buffer.removeSubrange(buffer.startIndex..<range.upperBound)
                     phase = .thinking
-                } else if buffer.hasSuffix("<") || buffer.hasSuffix("<t") || buffer.hasSuffix("<th") ||
-                          buffer.hasSuffix("<thi") || buffer.hasSuffix("<thin") || buffer.hasSuffix("<think") ||
-                          buffer.hasSuffix("<thinki") || buffer.hasSuffix("<thinkin") || buffer.hasSuffix("<thinking") {
+                } else if isSuffixOfTag(buffer, tags: ["<think>", "<thinking>", "<|channel>thought\n", "<|channel>thought"]) {
                     // Partial tag — hold in buffer until we know more
                     return (reasoning, content)
                 } else {
@@ -1283,13 +1634,13 @@ struct ThinkingStateTracker {
                     buffer = ""
                 }
             case .thinking:
-                let endRange = buffer.range(of: "</thinking>") ?? buffer.range(of: "</think>")
+                let endRange = buffer.range(of: "</thinking>") ?? buffer.range(of: "</think>") ?? buffer.range(of: "<channel|>")
                 if let range = endRange {
                     // Flush reasoning before the closing tag
                     reasoning += String(buffer[buffer.startIndex..<range.lowerBound])
                     buffer.removeSubrange(buffer.startIndex..<range.upperBound)
                     phase = .responding
-                } else if isSuffixOfClosingTag(buffer) {
+                } else if isSuffixOfTag(buffer, tags: ["</think>", "</thinking>", "<channel|>"]) {
                     // Partial closing tag — hold in buffer
                     return (reasoning, content)
                 } else {
@@ -1301,8 +1652,7 @@ struct ThinkingStateTracker {
         return (reasoning, content)
     }
 
-    private func isSuffixOfClosingTag(_ s: String) -> Bool {
-        let tags = ["</think>", "</thinking>"]
+    private func isSuffixOfTag(_ s: String, tags: [String]) -> Bool {
         for tag in tags {
             for len in stride(from: min(s.count, tag.count), through: 1, by: -1) {
                 let tagPrefix = String(tag.prefix(len))
@@ -1318,7 +1668,7 @@ struct ThinkingStateTracker {
 /// Tracks prefill progress: whether it is done, and how many tokens have been processed.
 /// n_past is updated by activePrefillProgressHook (called from LLMModel.prepare after each chunk)
 /// and read by the SSE heartbeat task every 2 s.
-private actor PrefillState {
+actor PrefillState {
     private(set) var done: Bool = false
     private(set) var nPast: Int = 0
     func finish() { done = true }
@@ -1337,29 +1687,39 @@ func handleChatStreaming(
     stats: ServerStats,
     genStart: Date,
     prefillStart: Date,
+    emitPrefillProgress: Bool,
     onPrefillDone: (() async -> Void)? = nil
 ) -> Response {
     let (sseStream, cont) = AsyncStream<String>.makeStream()
 
-    // ── Prefill heartbeat: emit llama-server-style slot_update progress every 2 s ──
-    // n_past is updated by activePrefillProgressHook in LLMModel.prepare() after each
-    // 512-token chunk; single-chunk prompts only show elapsed_seconds.
     let prefillState = PrefillState()
-    activePrefillProgressHook = { nPast, _ in
-        Task { await prefillState.update(nPast: nPast) }
-    }
-    Task {
-        var elapsed = 0
-        while await !prefillState.done {
-            try? await Task.sleep(for: .seconds(2))
-            if await !prefillState.done {
-                elapsed += 2
-                let nPast = await prefillState.nPast
-                _ = cont.yield(ssePrefillChunk(
-                    modelId: modelId,
-                    nPast: nPast,
-                    promptTokens: promptTokenCount,
-                    elapsedSeconds: elapsed))
+    // ── Prefill heartbeat (opt-in via X-SwiftLM-Prefill-Progress: true) ──
+    // We capture the hook in a local variable so that concurrent requests
+    // cannot clobber each other's hook via the global. The global is still
+    // written here because LLMModel.prepare() reads it, but the semaphore
+    // ensures only one generation runs at a time.
+    var heartbeatTask: Task<Void, Never>? = nil
+    activePrefillProgressHook = nil
+    if emitPrefillProgress {
+        // Hook is scoped to this request: the local prefillState is the only
+        // shared state, and it is actor-isolated.
+        activePrefillProgressHook = { nPast, _ in
+            Task { await prefillState.update(nPast: nPast) }
+        }
+        heartbeatTask = Task {
+            var elapsed = 0
+            while await !prefillState.done {
+                try? await Task.sleep(for: .seconds(2))
+                // Guard against Task cancellation on client disconnect.
+                guard !Task.isCancelled else { break }
+                if await !prefillState.done {
+                    elapsed += 2
+                    let nPast = await prefillState.nPast
+                    _ = cont.yield(ssePrefillChunk(
+                        nPast: nPast,
+                        promptTokens: promptTokenCount,
+                        elapsedSeconds: elapsed))
+                }
             }
         }
     }
@@ -1372,6 +1732,13 @@ func handleChatStreaming(
         var stopped = false
         var firstToken = true
         var tracker = ThinkingStateTracker()
+        // Unconditional cleanup: guarantees heartbeat is cancelled on ALL exit paths
+        // (normal completion, client disconnect, or task cancellation during prefill).
+        defer {
+            heartbeatTask?.cancel()
+            heartbeatTask = nil
+            activePrefillProgressHook = nil
+        }
         
         // ── JSON mode streaming: buffer early tokens to strip hallucinated prefixes ──
         var jsonBuffering = jsonMode
@@ -1389,7 +1756,9 @@ func handleChatStreaming(
                 }
                 // Signal first token — stops the prefill heartbeat task
                 if firstToken {
-                    // First decode token: stop heartbeat and clear the prefill progress hook
+                    // First decode token: cancel heartbeat and clear the prefill progress hook.
+                    heartbeatTask?.cancel()
+                    heartbeatTask = nil
                     activePrefillProgressHook = nil
                     await prefillState.finish()
                     let prefillDur = Date().timeIntervalSince(prefillStart)
@@ -1451,8 +1820,10 @@ func handleChatStreaming(
                                             content: c.isEmpty ? nil : c, finishReason: nil))
                     }
                     cont.yield(sseChunk(modelId: modelId, reasoningContent: nil, content: nil, finishReason: "stop"))
+                    let genDur = Date().timeIntervalSince(genStart)
+                    let genTokPerSec = genDur > 0 ? Double(completionTokenCount) / genDur : 0
                     if includeUsage {
-                        cont.yield(sseUsageChunk(modelId: modelId, promptTokens: promptTokenCount, completionTokens: completionTokenCount))
+                        cont.yield(sseUsageChunk(modelId: modelId, promptTokens: promptTokenCount, completionTokens: completionTokenCount, tokPerSec: genTokPerSec, durationMs: genDur * 1000))
                     }
                     cont.yield("data: [DONE]\r\n\r\n")
                     cont.finish()
@@ -1479,6 +1850,8 @@ func handleChatStreaming(
                 toolCallIndex += 1
 
             case .info(let info):
+                heartbeatTask?.cancel()
+                heartbeatTask = nil
                 activePrefillProgressHook = nil
                 await prefillState.finish()
                 if !stopped {
@@ -1490,8 +1863,10 @@ func handleChatStreaming(
                         reason = hasToolCalls ? "tool_calls" : "stop"
                     }
                     cont.yield(sseChunk(modelId: modelId, reasoningContent: nil, content: nil, finishReason: reason))
+                    let genDur = Date().timeIntervalSince(genStart)
+                    let genTokPerSec = genDur > 0 ? Double(completionTokenCount) / genDur : 0
                     if includeUsage {
-                        cont.yield(sseUsageChunk(modelId: modelId, promptTokens: promptTokenCount, completionTokens: completionTokenCount))
+                        cont.yield(sseUsageChunk(modelId: modelId, promptTokens: promptTokenCount, completionTokens: completionTokenCount, tokPerSec: genTokPerSec, durationMs: genDur * 1000))
                     }
                     cont.yield("data: [DONE]\r\n\r\n")
                     cont.finish()
@@ -1499,8 +1874,8 @@ func handleChatStreaming(
                     print("")  // end the real-time token stream line
                     let postMemSnap = MemoryUtils.snapshot()
                     print("srv  slot done: id 0 | gen_tokens=\(completionTokenCount) | OS_RAM=\(String(format: "%.1f", postMemSnap.os))GB | MEM_DEMAND=\(String(format: "%.1f", postMemSnap.demand))GB | GPU_MEM=\(String(format: "%.1f", postMemSnap.gpu))GB")
-                    let dur = Date().timeIntervalSince(genStart)
-                    let tokPerSec = dur > 0 ? Double(completionTokenCount) / dur : 0
+                    let dur = genDur
+                    let tokPerSec = genTokPerSec
                     let logContent: Any = hasToolCalls ? NSNull() : fullText
                     let logResp: [String: Any] = [
                         "choices": [[
@@ -1613,7 +1988,9 @@ func handleChatNonStreaming(
     var reasoningContent: String? = nil
     var responseContent = fullText
     if enableThinking {
+        print("srv debug: pre-extract fullText=\(fullText.prefix(40).debugDescription)")
         let (extracted, remaining) = extractThinkingBlock(from: fullText)
+        print("srv debug: extracted=\(extracted != nil ? "true" : "false"), remaining_len=\(remaining.count)")
         if let extracted {
             reasoningContent = extracted
             responseContent = remaining
@@ -1650,7 +2027,12 @@ func handleChatNonStreaming(
                 finishReason: hasToolCalls ? "tool_calls" : finishReason
             )
         ],
-        usage: TokenUsage(promptTokens: promptTokenCount, completionTokens: completionTokenCount, totalTokens: totalTokens)
+        usage: TokenUsage(promptTokens: promptTokenCount, completionTokens: completionTokenCount, totalTokens: totalTokens),
+        timings: ChatCompletionResponse.Timings(
+            predictedPerSecond: duration > 0 ? Double(completionTokenCount) / duration : 0,
+            predictedN: completionTokenCount,
+            predictedMs: duration * 1000
+        )
     )
     let encoded = try JSONEncoder().encode(resp)
     // llama-server style: log full response JSON on one line
@@ -1667,11 +2049,11 @@ func handleChatNonStreaming(
 
 /// Returns (thinkingContent, remainingContent) or (nil, original) if no block found.
 func extractThinkingBlock(from text: String) -> (String?, String) {
-    let startTag = text.range(of: "<thinking>") ?? text.range(of: "<think>")
-    let endTag = text.range(of: "</thinking>") ?? text.range(of: "</think>")
+    let startTag = text.range(of: "<thinking>") ?? text.range(of: "<think>") ?? text.range(of: "<|channel>thought\n") ?? text.range(of: "<|channel>thought") ?? (text.hasPrefix("thought\n") ? text.range(of: "thought\n") : nil)
+    let endTag = text.range(of: "</thinking>") ?? text.range(of: "</think>") ?? text.range(of: "<channel|>")
     
     guard let startRange = startTag, let endRange = endTag else {
-        // If there's an unclosed <think> or <thinking> block (still thinking when stopped)
+        // If there's an unclosed thinking block (still thinking when stopped)
         if let startRange = startTag {
             let thinking = String(text[startRange.upperBound...])
             return (thinking.isEmpty ? nil : thinking, "")
@@ -1686,6 +2068,7 @@ func extractThinkingBlock(from text: String) -> (String?, String) {
 // ── Text Completions Handler ─────────────────────────────────────────────────
 
 func handleTextCompletion(
+    request: Request,
     bodyData: Data,
     config: ServerConfig,
     container: ModelContainer,
@@ -1694,6 +2077,7 @@ func handleTextCompletion(
 ) async throws -> Response {
     let compReq = try JSONDecoder().decode(TextCompletionRequest.self, from: bodyData)
     let isStream = compReq.stream ?? false
+    let emitPrefillProgress = prefillProgressEnabled(in: request)
 
     let tokenLimit = compReq.maxTokens ?? config.maxTokens
     let temperature = compReq.temperature.map(Float.init) ?? config.temp
@@ -1734,7 +2118,8 @@ func handleTextCompletion(
     if isStream {
         return handleTextStreaming(
             stream: stream, modelId: modelId, stopSequences: stopSequences,
-            semaphore: semaphore, stats: stats, genStart: genStart
+            promptTokenCount: promptTokenCount, semaphore: semaphore, stats: stats,
+            genStart: genStart, emitPrefillProgress: emitPrefillProgress
         )
     } else {
         return try await handleTextNonStreaming(
@@ -1750,19 +2135,59 @@ func handleTextStreaming(
     stream: AsyncStream<Generation>,
     modelId: String,
     stopSequences: [String],
+    promptTokenCount: Int,
     semaphore: AsyncSemaphore,
     stats: ServerStats,
-    genStart: Date
+    genStart: Date,
+    emitPrefillProgress: Bool
 ) -> Response {
     let (sseStream, cont) = AsyncStream<String>.makeStream()
+    let prefillState = PrefillState()
+    var heartbeatTask: Task<Void, Never>? = nil
+    activePrefillProgressHook = nil
+    if emitPrefillProgress {
+        activePrefillProgressHook = { nPast, _ in
+            Task { await prefillState.update(nPast: nPast) }
+        }
+        heartbeatTask = Task {
+            var elapsed = 0
+            while await !prefillState.done {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { break }
+                if await !prefillState.done {
+                    elapsed += 2
+                    let nPast = await prefillState.nPast
+                    _ = cont.yield(ssePrefillChunk(
+                        nPast: nPast,
+                        promptTokens: promptTokenCount,
+                        elapsedSeconds: elapsed))
+                }
+            }
+        }
+    }
     Task {
         var completionTokenCount = 0
         var fullText = ""
         var stopped = false
+        var firstToken = true
+        // Unconditional cleanup: guarantees heartbeat is cancelled on ALL exit paths
+        // (normal completion, client disconnect, or task cancellation during prefill).
+        defer {
+            heartbeatTask?.cancel()
+            heartbeatTask = nil
+            activePrefillProgressHook = nil
+        }
         for await generation in stream {
             if stopped { break }
             switch generation {
             case .chunk(let text, _):
+                if firstToken {
+                    heartbeatTask?.cancel()
+                    heartbeatTask = nil
+                    activePrefillProgressHook = nil
+                    await prefillState.finish()
+                    firstToken = false
+                }
                 completionTokenCount += 1
                 fullText += text
                 // GPU yield: prevent Metal from starving macOS WindowServer
@@ -1785,6 +2210,10 @@ func handleTextStreaming(
             case .toolCall:
                 break
             case .info(let info):
+                heartbeatTask?.cancel()
+                heartbeatTask = nil
+                activePrefillProgressHook = nil
+                await prefillState.finish()
                 if !stopped {
                     var reason: String
                     switch info.stopReason {
@@ -1856,7 +2285,12 @@ func handleTextNonStreaming(
         choices: [
             TextChoice(index: 0, text: fullText, finishReason: finishReason)
         ],
-        usage: TokenUsage(promptTokens: promptTokenCount, completionTokens: completionTokenCount, totalTokens: totalTokens)
+        usage: TokenUsage(promptTokens: promptTokenCount, completionTokens: completionTokenCount, totalTokens: totalTokens),
+        timings: ChatCompletionResponse.Timings(
+            predictedPerSecond: duration > 0 ? Double(completionTokenCount) / duration : 0,
+            predictedN: completionTokenCount,
+            predictedMs: duration * 1000
+        )
     )
     let encoded = try JSONEncoder().encode(resp)
     return Response(
@@ -1930,7 +2364,7 @@ struct CORSMiddleware<Context: RequestContext>: RouterMiddleware {
             }
         }
         fields.append(HTTPField(name: HTTPField.Name("Access-Control-Allow-Methods")!, value: "GET, POST, OPTIONS"))
-        fields.append(HTTPField(name: HTTPField.Name("Access-Control-Allow-Headers")!, value: "Content-Type, Authorization"))
+        fields.append(HTTPField(name: HTTPField.Name("Access-Control-Allow-Headers")!, value: "Content-Type, Authorization, X-SwiftLM-Prefill-Progress"))
         return HTTPFields(fields)
     }
 }
@@ -1983,6 +2417,22 @@ func jsonHeaders() -> HTTPFields {
     HTTPFields([HTTPField(name: .contentType, value: "application/json")])
 }
 
+let prefillProgressHeaderName = HTTPField.Name("X-SwiftLM-Prefill-Progress")!
+
+func parseTruthyHeaderValue(_ value: String?) -> Bool {
+    guard let value else { return false }
+    switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "1", "on", "true", "yes":
+        return true
+    default:
+        return false
+    }
+}
+
+func prefillProgressEnabled(in request: Request) -> Bool {
+    parseTruthyHeaderValue(request.headers[values: prefillProgressHeaderName].first)
+}
+
 func sseHeaders() -> HTTPFields {
     HTTPFields([
         HTTPField(name: .contentType, value: "text/event-stream"),
@@ -2025,44 +2475,50 @@ func sseChunk(modelId: String, reasoningContent: String?, content: String?, fini
     return "data: \(String(data: data, encoding: .utf8)!)\r\n\r\n"
 }
 
-/// Prefill-progress heartbeat chunk — emitted every 2s while the server is processing the prompt.
-/// Uses object type "prefill_progress" so clients can filter it without confusing it with real tokens.
+/// Prefill-progress heartbeat chunk — emitted every 2s while the server is processing the prompt
+/// when explicitly enabled via `X-SwiftLM-Prefill-Progress: true`.
+/// It is sent as a named SSE event (`event: prefill_progress`) to avoid breaking strict
+/// OpenAI-compatible clients (e.g. OpenCode), which reject unknown `data:` objects.
 /// Format mirrors llama-server's slot_update event:
 ///   n_past          : tokens evaluated so far (real value from chunked prefill, or 0 for single-chunk)
 ///   n_prompt_tokens : total prompt token count
 ///   fraction        : n_past / n_prompt_tokens (0.0–1.0), useful for progress bars
 ///   elapsed_seconds : wall-clock time since the request started
-func ssePrefillChunk(modelId: String, nPast: Int = 0, promptTokens: Int, elapsedSeconds: Int) -> String {
+/// Note: `model` is intentionally omitted — clients can correlate from preceding stream chunks.
+/// Note: `on` is accepted as a truthy header value for parity with common reverse proxy conventions.
+func ssePrefillChunk(nPast: Int = 0, promptTokens: Int, elapsedSeconds: Int) -> String {
     let fraction = promptTokens > 0 ? Double(nPast) / Double(promptTokens) : 0.0
     let chunk: [String: Any] = [
-        "id": "prefill-\(UUID().uuidString)",
-        "object": "prefill_progress",
-        "created": Int(Date().timeIntervalSince1970),
-        "model": modelId,
-        "prefill": [
-            "status": "processing",
-            "n_past": nPast,
-            "n_prompt_tokens": promptTokens,
-            "fraction": fraction,
-            "elapsed_seconds": elapsedSeconds
-        ]
+        "status": "processing",
+        "n_past": nPast,
+        "n_prompt_tokens": promptTokens,
+        "fraction": fraction,
+        "elapsed_seconds": elapsedSeconds
     ]
     let data = try! JSONSerialization.data(withJSONObject: chunk)
-    return "data: \(String(data: data, encoding: .utf8)!)\r\n\r\n"
+    return "event: prefill_progress\r\ndata: \(String(data: data, encoding: .utf8)!)\r\n\r\n"
 }
 
-func sseUsageChunk(modelId: String, promptTokens: Int, completionTokens: Int) -> String {
+func sseUsageChunk(modelId: String, promptTokens: Int, completionTokens: Int, tokPerSec: Double? = nil, durationMs: Double? = nil) -> String {
+    var usage: [String: Any] = [
+        "prompt_tokens": promptTokens,
+        "completion_tokens": completionTokens,
+        "total_tokens": promptTokens + completionTokens
+    ]
+    if let tokPerSec, let durationMs {
+        usage["timings"] = [
+            "predicted_per_second": tokPerSec,
+            "predicted_n": completionTokens,
+            "predicted_ms": durationMs
+        ]
+    }
     let chunk: [String: Any] = [
         "id": "chatcmpl-\(UUID().uuidString)",
         "object": "chat.completion.chunk",
         "created": Int(Date().timeIntervalSince1970),
         "model": modelId,
         "choices": [] as [[String: Any]],
-        "usage": [
-            "prompt_tokens": promptTokens,
-            "completion_tokens": completionTokens,
-            "total_tokens": promptTokens + completionTokens
-        ]
+        "usage": usage
     ]
     let data = try! JSONSerialization.data(withJSONObject: chunk)
     return "data: \(String(data: data, encoding: .utf8)!)\r\n\r\n"
@@ -2275,6 +2731,10 @@ struct ChatCompletionRequest: Decodable {
     let chatTemplateKwargs: [String: Bool]?
     /// Top-level thinking override emitted by Aegis-AI gateway
     let enableThinking: Bool?
+    /// Number of bits for native MLX quantized KV cache (nil = no quantization).
+    /// Only 4 and 8 are supported by the underlying MLX QuantizedKVCache.
+    /// Enables `QuantizedKVCache` instead of `KVCacheSimple`.  Separate from `--turbo-kv`.
+    let kvBits: Int?
 
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, tools, stop, seed
@@ -2289,6 +2749,7 @@ struct ChatCompletionRequest: Decodable {
         case responseFormat = "response_format"
         case chatTemplateKwargs = "chat_template_kwargs"
         case enableThinking = "enable_thinking"
+        case kvBits = "kv_bits"
     }
 }
 
@@ -2322,6 +2783,19 @@ struct ChatCompletionResponse: Encodable {
     let created: Int
     let choices: [Choice]
     let usage: TokenUsage
+    let timings: Timings?
+
+    struct Timings: Encodable {
+        let predictedPerSecond: Double
+        let predictedN: Int
+        let predictedMs: Double
+
+        enum CodingKeys: String, CodingKey {
+            case predictedPerSecond = "predicted_per_second"
+            case predictedN = "predicted_n"
+            case predictedMs = "predicted_ms"
+        }
+    }
 }
 
 struct Choice: Encodable {
@@ -2375,6 +2849,7 @@ struct TextCompletionResponse: Encodable {
     let created: Int
     let choices: [TextChoice]
     let usage: TokenUsage
+    let timings: ChatCompletionResponse.Timings?
 }
 
 struct TextChoice: Encodable {

@@ -43,6 +43,7 @@ PKG_SWIFTSOUP = uid()
 PROD_MLX      = uid()
 PROD_MLXLLM   = uid()
 PROD_MLXLMC   = uid()
+PROD_MLXVLM   = uid()
 PROD_HUB      = uid()
 PROD_TOKENIZERS = uid()
 PROD_HUMMINGBIRD = uid()
@@ -52,6 +53,7 @@ PROD_SWIFTSOUP = uid()
 BF_MLX_FWK    = uid()
 BF_MLXLLM_FWK = uid()
 BF_MLXLMC_FWK = uid()
+BF_MLXVLM_FWK = uid()
 BF_HUB_FWK    = uid()
 BF_TOKENIZERS_FWK = uid()
 BF_HUMMINGBIRD_FWK = uid()
@@ -74,6 +76,7 @@ core_sources = [
     ("../Sources/MLXInferenceCore/ModelDownloader.swift",      uid(), uid()),
     ("../Sources/MLXInferenceCore/ModelDownloadManager.swift", uid(), uid()),
     ("../Sources/MLXInferenceCore/HFModelSearch.swift",        uid(), uid()),
+    ("../Sources/MLXInferenceCore/ModelArchitectureProbe.swift", uid(), uid()),
     ("../Sources/MLXInferenceCore/InferenceEngine.swift",      uid(), uid()),
 ]
 
@@ -89,6 +92,7 @@ def pbxproj():
     build_files += f"\t\t{BF_MLX_FWK} /* MLX in Frameworks */ = {{isa = PBXBuildFile; productRef = {PROD_MLX} /* MLX */; }};\n"
     build_files += f"\t\t{BF_MLXLLM_FWK} /* MLXLLM in Frameworks */ = {{isa = PBXBuildFile; productRef = {PROD_MLXLLM} /* MLXLLM */; }};\n"
     build_files += f"\t\t{BF_MLXLMC_FWK} /* MLXLMCommon in Frameworks */ = {{isa = PBXBuildFile; productRef = {PROD_MLXLMC} /* MLXLMCommon */; }};\n"
+    build_files += f"\t\t{BF_MLXVLM_FWK} /* MLXVLM in Frameworks */ = {{isa = PBXBuildFile; productRef = {PROD_MLXVLM} /* MLXVLM */; }};\n"
     build_files += f"\t\t{BF_HUB_FWK} /* Hub in Frameworks */ = {{isa = PBXBuildFile; productRef = {PROD_HUB} /* Hub */; }};\n"
     build_files += f"\t\t{BF_TOKENIZERS_FWK} /* Tokenizers in Frameworks */ = {{isa = PBXBuildFile; productRef = {PROD_TOKENIZERS} /* Tokenizers */; }};\n"
     build_files += f"\t\t{BF_HUMMINGBIRD_FWK} /* Hummingbird in Frameworks */ = {{isa = PBXBuildFile; productRef = {PROD_HUMMINGBIRD} /* Hummingbird */; }};\n"
@@ -153,6 +157,7 @@ def pbxproj():
 \t\t\t\t{BF_MLX_FWK} /* MLX in Frameworks */,
 \t\t\t\t{BF_MLXLLM_FWK} /* MLXLLM in Frameworks */,
 \t\t\t\t{BF_MLXLMC_FWK} /* MLXLMCommon in Frameworks */,
+\t\t\t\t{BF_MLXVLM_FWK} /* MLXVLM in Frameworks */,
 \t\t\t\t{BF_HUB_FWK} /* Hub in Frameworks */,
 \t\t\t\t{BF_TOKENIZERS_FWK} /* Tokenizers in Frameworks */,
 \t\t\t\t{BF_HUMMINGBIRD_FWK} /* Hummingbird in Frameworks */,
@@ -233,6 +238,7 @@ def pbxproj():
 \t\t\t\t{PROD_MLX} /* MLX */,
 \t\t\t\t{PROD_MLXLLM} /* MLXLLM */,
 \t\t\t\t{PROD_MLXLMC} /* MLXLMCommon */,
+				{PROD_MLXVLM} /* MLXVLM */,
 \t\t\t\t{PROD_HUB} /* Hub */,
 \t\t\t\t{PROD_TOKENIZERS} /* Tokenizers */,
 \t\t\t\t{PROD_HUMMINGBIRD} /* Hummingbird */,
@@ -454,6 +460,11 @@ def pbxproj():
 \t\t\tisa = XCSwiftPackageProductDependency;
 \t\t\tpackage = {PKG_MLXLM};
 \t\t\tproductName = MLXLMCommon;
+		}};
+		{PROD_MLXVLM} /* MLXVLM */ = {{
+			isa = XCSwiftPackageProductDependency;
+			package = {PKG_MLXLM};
+			productName = MLXVLM;
 \t\t}};
 \t\t{PROD_HUB} /* Hub */ = {{
 \t\t\tisa = XCSwiftPackageProductDependency;
@@ -507,7 +518,7 @@ def main():
     print("📂  MLXInferenceCore sources included directly:")
     for p, _, _ in [("ChatMessage", None, None), ("GenerationConfig", None, None),
                     ("ModelCatalog", None, None), ("ModelDownloadManager", None, None),
-                    ("InferenceEngine", None, None)]:
+                    ("ModelArchitectureProbe", None, None), ("InferenceEngine", None, None)]:
         print(f"    • {p}.swift")
     print()
     print("🎉  Open SwiftBuddy.xcodeproj in Xcode — no manual package setup needed.")

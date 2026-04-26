@@ -1,6 +1,14 @@
 #!/bin/bash
 set -eo pipefail
 
+# Safely append Homebrew bins to PATH if they exist, to avoid overriding custom toolchains
+if [[ ":$PATH:" != *":/opt/homebrew/bin:"* ]] && [ -d "/opt/homebrew/bin" ]; then
+    export PATH="$PATH:/opt/homebrew/bin"
+fi
+if [[ ":$PATH:" != *":/usr/local/bin:"* ]] && [ -d "/usr/local/bin" ]; then
+    export PATH="$PATH:/usr/local/bin"
+fi
+
 echo "=============================================="
 echo "    SwiftLM Build Script                      "
 echo "=============================================="
@@ -30,7 +38,18 @@ echo "   cmake: $(cmake --version | head -1)"
 echo ""
 echo "=> [3/4] Building Metal kernels (mlx.metallib)..."
 
-MLX_SRC=".build/checkouts/mlx-swift/Source/Cmlx/mlx"
+if [ -d "mlx-swift/Source/Cmlx/mlx" ]; then
+    MLX_SRC="mlx-swift/Source/Cmlx/mlx"
+elif [ -d ".build/checkouts/mlx-swift/Source/Cmlx/mlx" ]; then
+    MLX_SRC=".build/checkouts/mlx-swift/Source/Cmlx/mlx"
+else
+    echo "❌ Could not locate mlx-swift sources."
+    echo "   Expected one of:"
+    echo "   - mlx-swift/Source/Cmlx/mlx"
+    echo "   - .build/checkouts/mlx-swift/Source/Cmlx/mlx"
+    echo "   Make sure submodules are initialized."
+    exit 1
+fi
 METALLIB_BUILD_DIR=".build/metallib_build"
 METALLIB_DEST=".build/arm64-apple-macosx/release"
 

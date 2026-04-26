@@ -343,13 +343,14 @@ enum ModelProfiler {
     // MARK: Partition Planning
 
     /// Compute a partition plan for the given model on the current system.
-    static func plan(model: ModelProfile, system: SystemProfile, contextSize: Int) -> PartitionPlan {
+    static func plan(model: ModelProfile, system: SystemProfile, contextSize: Int, draftWeightBytes: Int = 0) -> PartitionPlan {
         let weightGB = model.weightMemoryGB > 0
             ? model.weightMemoryGB
             : model.estimatedParamsB * (Double(model.quantBits) / 8.0)
+        let draftGB = Double(draftWeightBytes) / 1e9
         let kvGB = model.kvCacheMemoryGB(contextLength: contextSize)
         let overheadFactor = 1.2
-        let totalGB = weightGB * overheadFactor + kvGB
+        let totalGB = (weightGB + draftGB) * overheadFactor + kvGB
         let availableGB = system.availableRAMGB
         let overcommit = totalGB / availableGB
 
@@ -397,7 +398,7 @@ enum ModelProfiler {
             memoryLimit = Int(Double(system.recommendedWorkingSetBytes) * 1.5)
             cacheLimit = system.recommendedWorkingSetBytes // default
         case .swapAssisted:
-            memoryLimit = Int(totalGB * 1.1 * 1e9)
+            memoryLimit = 200 * 1024 * 1024 * 1024 // 200 GB sentinel to bypass MLX eval_impl spin loop (let macOS swap handle it)
             cacheLimit = 2 * 1024 * 1024 // 2MB — let OS manage caching
         case .layerPartitioned:
             memoryLimit = Int(availableGB * 0.85 * 1e9)

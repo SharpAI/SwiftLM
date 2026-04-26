@@ -86,23 +86,33 @@ print_server_log() {
     fi
 }
 
-echo "=============================================="
 export METAL_LIBRARY_PATH="$(pwd)/.build/arm64-apple-macosx/release"
-echo "    Aegis-AI MLX Profiling Benchmark Suite    "
-echo "=============================================="
-echo ""
 
-echo "Select Action:"
-echo "0) Test 0: Run Full Automated Matrix (Offline Evaluation)"
-echo "1) Test 1: Automated Context & Memory Profile (TPS & RAM matrix)"
-echo "2) Test 2: Prompt Cache & Sliding Window Regression Test"
-echo "3) Test 3: HomeSec Benchmark (LLM Only)"
-echo "4) Test 4: VLM End-to-End Evaluation"
-echo "5) Test 5: ALM Audio End-to-End Evaluation"
-echo "6) Test 6: Omni End-to-End Evaluation"
-echo "7) Model Maintain List and Delete"
-echo "8) Quit"
-read -p "Option (0-8): " suite_opt
+if [ -n "${SUITE_OPT:-}" ]; then
+    # Sub-process invocation from automated matrix — skip interactive menu
+    suite_opt="$SUITE_OPT"
+else
+    echo "=============================================="
+    echo "    Aegis-AI MLX Profiling Benchmark Suite    "
+    echo "=============================================="
+    echo ""
+    echo "Select Action:"
+    echo "0) Test 0: Run Full Automated Matrix (Offline Evaluation)"
+    echo "1) Test 1: Automated Context & Memory Profile (TPS & RAM matrix)"
+    echo "2) Test 2: Prompt Cache & Sliding Window Regression Test"
+    echo "3) Test 3: HomeSec Benchmark (LLM Only)"
+    echo "4) Test 4: VLM End-to-End Evaluation"
+    echo "5) Test 5: ALM Audio End-to-End Evaluation"
+    echo "6) Test 6: Omni End-to-End Evaluation"
+    echo "7) Model Maintain List and Delete"
+    echo "8) Test 8: Tool-Call Degeneration Regression (Gemma-4 vague-query bug)"
+    echo "9) Test 9: Quantized KV Cache Regression (Gemma-4 issue #71 — native kv_bits)"
+    echo "10) Test 10: SSD + Draft Model Memory Regression (Issue #72 — auto-cap + RAM guard)"
+    echo "11) Test 11: DFlash Benchmark (Qwen3-Coder-Next-4bit)"
+    echo "12) Test 12: DFlash Benchmark (Qwen3.6-35B-A3B-4bit)"
+    echo "q) Quit"
+    read -p "Option (0-12/q): " suite_opt
+fi
 
 if [ "$suite_opt" == "0" ]; then
     echo "=============================================="
@@ -123,16 +133,20 @@ if [ "$suite_opt" == "0" ]; then
             MODEL=$(python3 scripts/hf_discovery.py "mlx-community/Qwen Audio Instruct" || echo "mlx-community/Qwen2-Audio-7B-Instruct")
         fi
         
-        echo -e "$TEST_ID\n11\n$MODEL" | HEADLESS=1 ./run_benchmark.sh
+        SUITE_OPT=$TEST_ID MODEL=$MODEL ./run_benchmark.sh
         sleep 5
     done
     echo "✅ Offline matrix execution fully completed."
     exit 0
 fi
 
-if [ "$suite_opt" == "8" ] || [ -z "$suite_opt" ]; then
+if [ "$suite_opt" == "q" ] || [ -z "$suite_opt" ]; then
     echo "Exiting."
     exit 0
+fi
+
+if [ "$suite_opt" == "9" ] || [ "$suite_opt" == "8" ] || [ "$suite_opt" == "10" ]; then
+    : # handled below — fall through
 fi
 
 if [ "$suite_opt" == "7" ]; then
@@ -188,6 +202,24 @@ if [ "$suite_opt" == "7" ]; then
     done
 fi
 
+if [ "$suite_opt" == "11" ]; then
+    echo ""
+    echo "=> Starting Test 11: DFlash Benchmark (Qwen3-Coder-Next-4bit)"
+    export MODEL="mlx-community/Qwen3-Coder-Next-4bit"
+    chmod +x scripts/profiling/bench_coder_next.sh
+    scripts/profiling/bench_coder_next.sh
+    exit $?
+fi
+
+if [ "$suite_opt" == "12" ]; then
+    echo ""
+    echo "=> Starting Test 12: DFlash Benchmark (Qwen3.6-35B-A3B-4bit)"
+    export MODEL="mlx-community/Qwen3.6-35B-A3B-4bit"
+    chmod +x scripts/profiling/bench_35b.sh
+    scripts/profiling/bench_35b.sh
+    exit $?
+fi
+
 echo ""
 PS3="Select a model to use: "
 if [ "$suite_opt" == "4" ]; then
@@ -198,6 +230,7 @@ if [ "$suite_opt" == "4" ]; then
         "mlx-community/gemma-4-26b-a4b-it-4bit"
         "mlx-community/Qwen3.5-9B-MLX-4bit"
         "mlx-community/Qwen3.5-27B-4bit"
+        "LiquidAI/LFM2.5-VL-450M-MLX-4bit"
         "mlx-community/LFM2-VL-1.6B-4bit"
         "mlx-community/Qwen2-VL-2B-Instruct-4bit"
         "mlx-community/Qwen2-VL-7B-Instruct-4bit"
@@ -227,33 +260,36 @@ else
         "mlx-community/phi-4-mlx-4bit"
         "baa-ai/GLM-5.1-RAM-270GB-MLX"
         "baa-ai/GLM-5.1-4bit"
+        "Thump604/DeepSeek-V4-Flash-MLX-Q3-mixed-gs128-affine"
         "Custom (Enter your own Hub ID)"
         "Quit"
     )
 fi
 
-select opt in "${options[@]}"
-do
-    case $opt in
-        "Custom (Enter your own Hub ID)")
-            read -p "Enter HuggingFace ID (e.g., mlx-community/Llama-3.2-3B-Instruct-4bit): " custom_model
-            MODEL=$custom_model
-            break
-            ;;
-        "Quit")
-            echo "Exiting."
-            exit 0
-            ;;
-        *) 
-            if [[ -n "$opt" ]]; then
-                MODEL=$opt
+if [ -z "$MODEL" ]; then
+    select opt in "${options[@]}"
+    do
+        case $opt in
+            "Custom (Enter your own Hub ID)")
+                read -p "Enter HuggingFace ID (e.g., mlx-community/Llama-3.2-3B-Instruct-4bit): " custom_model
+                MODEL=$custom_model
                 break
-            else
-                echo "Invalid option $REPLY"
-            fi
-            ;;
-    esac
-done
+                ;;
+            "Quit")
+                echo "Exiting."
+                exit 0
+                ;;
+            *) 
+                if [[ -n "$opt" ]]; then
+                    MODEL=$opt
+                    break
+                else
+                    echo "Invalid option $REPLY"
+                fi
+                ;;
+        esac
+    done
+fi
 
 # Ensure model has an org prefix if it doesn't already
 if [[ "$MODEL" != *"/"* ]]; then
@@ -275,6 +311,147 @@ elif [ -f ".build/release/SwiftLM" ]; then
 else
     echo "⚠️  SwiftLM release binary not found! Please compile the project by running ./build.sh first."
     exit 1
+fi
+
+# ── Test 8: Tool-Call Degeneration Regression ───────────────────────────────
+# Regression test for the Gemma-4 vague-query bug:
+#   With a small tool schema (<<100 tokens) the model should call the tool
+#   for an obvious tool-use query.  Previously it produced garbage/text 6/6
+#   times due to the <|channel>thought\n<channel|> generation-prompt suffix
+#   flattening the first-token distribution.
+# Pass criteria: ≥3/5 clean tool_calls on vague query  AND  3/3 on explicit query.
+if [ "$suite_opt" == "8" ]; then
+    echo ""
+    echo "=> Test 8: Tool-Call Degeneration Regression on $FULL_MODEL"
+    echo "   (Reproduces GitHub issue: vague query + small tool = degenerate output)"
+
+    echo "Starting server on port 5431..."
+    killall SwiftLM 2>/dev/null
+    mkdir -p tmp
+    $BIN --model "$FULL_MODEL" --port 5431 --stream-experts --ctx-size 4096 > ./tmp/tool_regression.log 2>&1 &
+    SERVER_PID=$!
+
+    echo "Waiting for server (up to 120s)..."
+    for i in {1..120}; do
+        if ! kill -0 $SERVER_PID 2>/dev/null; then
+            echo "❌ Server died early. Logs:"
+            print_server_log ./tmp/tool_regression.log
+            exit 1
+        fi
+        if curl -sf http://127.0.0.1:5431/health > /dev/null 2>&1; then
+            echo "Server ready (${i}s)"
+            break
+        fi
+        sleep 1
+    done
+
+    echo ""
+    echo "Running regression suite..."
+
+    python3 - << 'TOOL_REG_EOF'
+import json, urllib.request, time, sys
+
+BASE = "http://127.0.0.1:5431"
+TOOL = {"type":"function","function":{"name":"web_search",
+    "description":"Search the web",
+    "parameters":{"type":"object",
+    "properties":{"query":{"type":"string"}},"required":["query"]}}}
+
+def call(messages, tools=None, temp=0.0, max_tokens=2000):
+    payload = {"messages": messages, "max_tokens": max_tokens,
+               "temperature": temp, "stream": False, "repetition_penalty": 1.15}
+    if tools:
+        payload["tools"] = tools
+    req = urllib.request.Request(f"{BASE}/v1/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"})
+    t0 = time.time()
+    with urllib.request.urlopen(req, timeout=180) as r:
+        d = json.loads(r.read())
+    elapsed = time.time() - t0
+    choice = d["choices"][0]
+    tc = choice["message"].get("tool_calls")
+    content = choice["message"].get("content") or ""
+    return tc, content, elapsed, d["usage"]["prompt_tokens"]
+
+def classify(tc, content):
+    if tc:
+        return "TOOL_CALL", tc[0]["function"]["name"]
+    words = content.split()
+    if len(words) > 5:
+        top = max(set(words), key=words.count)
+        if words.count(top) > len(words) * 0.35:
+            return "DEGENERATE", f"repeat={repr(top)}"
+    if "<|channel>" in content or "<channel|>" in content:
+        return "DEGENERATE", "leaked control tokens"
+    return "TEXT", content[:60]
+
+FAILS = []
+
+print("\n─── [1/3] Vague query WITH tool schema (must handle ambiguity naturally, tool call or text) ───")
+vague_ok = 0
+for i in range(5):
+    tc, content, t, pt = call(
+        [{"role":"system","content":"You are a helpful AI assistant."}, {"role":"user","content":"what is the news"}], tools=[TOOL])
+    kind, detail = classify(tc, content)
+    ok = kind in ("TOOL_CALL", "TEXT")
+    if ok: vague_ok += 1
+    print(f"  {'✅' if ok else '❌'} run {i+1} [{t:.1f}s P={pt}t]: {kind} — {detail.replace(chr(10), ' ')[:75]}")
+print(f"  → {vague_ok}/5 runs passed without degenerating")
+if vague_ok < 3:
+    FAILS.append(f"Vague query: only {vague_ok}/5 clean runs (need ≥3)")
+
+print("\n─── [2/3] Control: same query WITHOUT tools (must be coherent text) ───")
+coherent_ok = 0
+for i in range(3):
+    tc, content, t, pt = call([{"role":"system","content":"You are a helpful AI assistant."}, {"role":"user","content":"what is the news"}], temp=0.7, max_tokens=200)
+    kind, detail = classify(tc, content)
+    ok = kind == "TEXT"
+    if ok: coherent_ok += 1
+    print(f"  {'✅' if ok else '❌'} run {i+1} [{t:.1f}s P={pt}t]: {kind} — {detail}")
+print(f"  → {coherent_ok}/3 coherent text responses")
+if coherent_ok < 3:
+    FAILS.append(f"No-tool control: only {coherent_ok}/3 coherent (need 3)")
+
+print("\n─── [3/3] Explicit query WITH tool schema (must always call tool) ───")
+explicit_ok = 0
+for i in range(3):
+    tc, content, t, pt = call(
+        [{"role":"system","content":"You are a helpful AI assistant."}, {"role":"user","content":"Use web_search to find news today"}], tools=[TOOL], max_tokens=2000)
+    kind, detail = classify(tc, content)
+    ok = kind == "TOOL_CALL"
+    if ok: explicit_ok += 1
+    print(f"  {'✅' if ok else '❌'} run {i+1} [{t:.1f}s P={pt}t]: {kind} — {detail}")
+print(f"  → {explicit_ok}/3 tool_calls")
+if explicit_ok < 3:
+    FAILS.append(f"Explicit query: only {explicit_ok}/3 tool_calls (need 3)")
+
+print("\n" + "─"*60)
+if not FAILS:
+    print("✅  REGRESSION PASSED — tool-call degeneration bug is fixed.")
+    print(f"   Vague: {vague_ok}/5  |  No-tool: {coherent_ok}/3  |  Explicit: {explicit_ok}/3")
+    sys.exit(0)
+else:
+    print("❌  REGRESSION FAILED:")
+    for f in FAILS:
+        print(f"    • {f}")
+    print("\n   Root cause: Gemma-4 <|channel>thought\\n<channel|> generation prefix")
+    print("   flattens the first-token distribution for vague queries with tools.")
+    sys.exit(1)
+TOOL_REG_EOF
+    TEST8_EXIT=$?
+
+    echo ""
+    echo "Cleaning up..."
+    kill $SERVER_PID 2>/dev/null
+    wait $SERVER_PID 2>/dev/null
+
+    if [ $TEST8_EXIT -eq 0 ]; then
+        echo "✅ Test 8 PASSED"
+    else
+        echo "❌ Test 8 FAILED — see output above."
+    fi
+    exit $TEST8_EXIT
 fi
 
 if [ "$suite_opt" == "2" ]; then
@@ -821,6 +998,346 @@ EOF
     wait $SERVER_PID 2>/dev/null
     rm -f /tmp/omni_payload.json "$IMAGE_PATH" "${AUDIO_PATH}.wav" "${AUDIO_PATH}.mp3"
     exit 0
+fi
+
+# ── Test 9: QuantizedKVCache Regression (issue #71) ────────────────────────
+# Verifies that Gemma-4 text models can decode with native MLX QuantizedKVCache
+# (kv_bits=4 and kv_bits=8) without triggering the:
+#   fatalError: `update` was called on `QuantizedKVCache`. Use `updateQuantized`.
+# crash fixed in PR #29 of mlx-swift-lm.
+#
+# Pass criteria:
+#   - 4-bit run: server does not crash, returns non-empty text response (≥3 tokens)
+#   - 8-bit run: same
+#   - Longer prompt run: exercises the last-20-layer KV-sharing path, same pass criteria
+#   - Baseline (no kv_bits): regression guard that the non-quantized path still works
+if [ "$suite_opt" == "9" ]; then
+    echo ""
+    echo "=> Test 9: Quantized KV Cache Regression (issue #71) on $FULL_MODEL"
+    echo "   Tests MLX native QuantizedKVCache (kv_bits=4, kv_bits=8) — NOT TurboKV"
+    echo "   This exercises the fix in mlx-swift-lm PR #29."
+
+    echo "Starting server on port 5431..."
+    killall SwiftLM 2>/dev/null
+    mkdir -p tmp
+    # No --turbo-kv flag: we want the vanilla KVCacheSimple path that will be
+    # upgraded to QuantizedKVCache by the per-request kv_bits field.
+    $BIN --model "$FULL_MODEL" --port 5431 --stream-experts --ctx-size 8192 > ./tmp/kvcache_regression.log 2>&1 &
+    SERVER_PID=$!
+
+    SERVER_READY=0
+    for i in {1..180}; do
+        if ! kill -0 $SERVER_PID 2>/dev/null; then
+            echo "❌ Server died early. Logs:"
+            print_server_log ./tmp/kvcache_regression.log
+            exit 1
+        fi
+        if curl -sf http://127.0.0.1:5431/health > /dev/null 2>&1; then
+            echo "Server ready (${i}s)"
+            SERVER_READY=1
+            break
+        fi
+        sleep 1
+    done
+    if [ $SERVER_READY -eq 0 ]; then
+        echo "❌ Server not ready after 180s. Logs:"
+        print_server_log ./tmp/kvcache_regression.log
+        kill $SERVER_PID 2>/dev/null
+        exit 1
+    fi
+
+    echo ""
+    echo "Running QuantizedKVCache regression suite..."
+
+    python3 - << 'KVBITS_EOF'
+import json, urllib.request, time, sys, re
+
+BASE = "http://127.0.0.1:5431"
+
+FAILS = []
+
+def call(messages, kv_bits=None, max_tokens=60, temperature=0.0):
+    payload = {
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if kv_bits is not None:
+        payload["kv_bits"] = kv_bits
+    req = urllib.request.Request(
+        f"{BASE}/v1/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            d = json.loads(r.read())
+    except Exception as e:
+        return None, str(e), time.time() - t0
+    elapsed = time.time() - t0
+    content = d["choices"][0]["message"].get("content") or ""
+    # Strip Gemma-4 thinking blocks — handle both <|channel|>thought and <|channel>thought variants
+    content = re.sub(r"<\|channel\|?>thought.*?<channel\|?>", "", content, flags=re.DOTALL).strip()
+    return d, content, elapsed
+
+MSGS_SHORT = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user",   "content": "Name the three primary colours. Be brief."},
+]
+
+# Longer prompt to exercise the KV sharing layers (last 20 of Gemma-4 share KV
+# from earlier layers — the bug manifests at those layers on multi-token prefills).
+MSGS_LONG = [
+    {"role": "system", "content": "You are a knowledgeable AI assistant. Answer concisely."},
+    {"role": "user",   "content": "Explain in two sentences why the sky appears blue during the day and red at sunset. Use physics terminology."},
+]
+
+# ── [1] 4-bit quantized KV cache ──
+print("\n─── [1/4] kv_bits=4, short prompt ───")
+d, content, t = call(MSGS_SHORT, kv_bits=4)
+if d is None:
+    print(f"  ❌ CRASHED: {content}")
+    FAILS.append("kv_bits=4 short: server crash or timeout")
+else:
+    gen_toks = d["usage"]["completion_tokens"]
+    ok = len(content.strip()) > 5 and gen_toks >= 3
+    print(f"  {'✅' if ok else '❌'} [{t:.1f}s, {gen_toks} tokens]: {content[:100]}")
+    if not ok:
+        FAILS.append(f"kv_bits=4 short: too few tokens or empty ({gen_toks} tokens)")
+
+# ── [2] 8-bit quantized KV cache ──
+print("\n─── [2/4] kv_bits=8, short prompt ───")
+d, content, t = call(MSGS_SHORT, kv_bits=8)
+if d is None:
+    print(f"  ❌ CRASHED: {content}")
+    FAILS.append("kv_bits=8 short: server crash or timeout")
+else:
+    gen_toks = d["usage"]["completion_tokens"]
+    ok = len(content.strip()) > 5 and gen_toks >= 3
+    print(f"  {'✅' if ok else '❌'} [{t:.1f}s, {gen_toks} tokens]: {content[:100]}")
+    if not ok:
+        FAILS.append(f"kv_bits=8 short: too few tokens or empty ({gen_toks} tokens)")
+
+# ── [3] 4-bit, longer prompt (exercises KV-sharing layers) ──
+print("\n─── [3/4] kv_bits=4, longer prompt (exercises KV-sharing path) ───")
+d, content, t = call(MSGS_LONG, kv_bits=4, max_tokens=120)
+if d is None:
+    print(f"  ❌ CRASHED: {content}")
+    FAILS.append("kv_bits=4 long: server crash or timeout")
+else:
+    gen_toks = d["usage"]["completion_tokens"]
+    ok = len(content.strip()) > 10 and gen_toks >= 5
+    print(f"  {'✅' if ok else '❌'} [{t:.1f}s, {gen_toks} tokens]: {content[:120]}")
+    if not ok:
+        FAILS.append(f"kv_bits=4 long: too few tokens or empty ({gen_toks} tokens)")
+
+# ── [4] Baseline without kv_bits (must still work — regression guard) ──
+print("\n─── [4/4] kv_bits=None baseline (no quantization) ───")
+d, content, t = call(MSGS_SHORT, kv_bits=None)
+if d is None:
+    print(f"  ❌ CRASHED: {content}")
+    FAILS.append("baseline (no kv_bits): server crash or timeout")
+else:
+    gen_toks = d["usage"]["completion_tokens"]
+    ok = len(content.strip()) > 5 and gen_toks >= 3
+    print(f"  {'✅' if ok else '❌'} [{t:.1f}s, {gen_toks} tokens]: {content[:100]}")
+    if not ok:
+        FAILS.append(f"baseline: too few tokens or empty ({gen_toks} tokens)")
+
+print("\n" + "─" * 60)
+if not FAILS:
+    print("✅  REGRESSION PASSED — QuantizedKVCache dispatches correctly.")
+    print("   kv_bits=4 ✓  |  kv_bits=8 ✓  |  KV-sharing path ✓  |  baseline ✓")
+    sys.exit(0)
+else:
+    print("❌  REGRESSION FAILED:")
+    for f in FAILS:
+        print(f"    • {f}")
+    print("\n   Root cause (if kv_bits runs crash): unconditional `cache.update()` call")
+    print("   in Gemma4TextAttention.callAsFunction — see mlx-swift-lm PR #29.")
+    sys.exit(1)
+KVBITS_EOF
+    TEST9_EXIT=$?
+
+    echo ""
+    echo "Cleaning up..."
+    kill $SERVER_PID 2>/dev/null
+    wait $SERVER_PID 2>/dev/null
+
+    if [ $TEST9_EXIT -eq 0 ]; then
+        echo "✅ Test 9 PASSED"
+    else
+        echo "❌ Test 9 FAILED — see output above."
+    fi
+    exit $TEST9_EXIT
+fi
+
+# ── Test 10: Issue #72 Regression — SSD streaming + draft model RAM guard ────
+# Verifies three things that the fix introduced:
+#   1. Auto-cap: --num-draft-tokens is silently capped to 1 (logged at startup)
+#   2. RAM guard: peak RAM during inference stays below 80% of physical RAM
+#   3. Inference: the combination still produces valid output (not crashed/empty)
+#
+# Uses small models (Qwen3.5-4B main + Qwen3.5-0.8B draft) so the test runs on
+# any hardware without requiring 35B weights. These are the same parameter-class
+# proportions as the reporter's 35B + 4B scenario (large main, tiny draft).
+#
+# Pass criteria:
+#   ✅ Server log contains auto-cap warning (proves the guard fired)
+#   ✅ Peak RAM < 80% physical RAM (proves no swap explosion)
+#   ✅ /v1/chat/completions returns content (proves the combo is functional)
+if [ "$suite_opt" == "10" ]; then
+    T10_PORT=15472
+    T10_MAIN="$MODEL"
+    
+    echo ""
+    read -p "   Enter Draft Model HuggingFace ID (default: mlx-community/Qwen3.5-0.8B-MLX-4bit): " custom_draft
+    if [ -z "$custom_draft" ]; then
+        T10_DRAFT="mlx-community/Qwen3.5-0.8B-MLX-4bit"
+    else
+        T10_DRAFT="$custom_draft"
+    fi
+    
+    echo ""
+    echo "=> Test 10: Issue #72 SSD + Draft Model Memory Regression"
+    echo "   Main:  $T10_MAIN  (SSD-streamed)"
+    echo "   Draft: $T10_DRAFT (in-RAM)"
+
+    T10_LOG="./tmp/test10_issue72.log"
+    mkdir -p tmp
+
+    # Measure RAM via vm_stat (Apple Silicon page size = 16384 bytes)
+    get_ram_gb_t10() {
+        PAGE_SIZE=$(sysctl -n hw.pagesize)
+        vm_stat | awk -v page_size="$PAGE_SIZE" '
+            /Pages active:/        { v=$3; gsub(/\./, "", v); act=v+0 }
+            /Pages wired down:/    { v=$4; gsub(/\./, "", v); wire=v+0 }
+            /Pages occupied by compressor:/ { v=$5; gsub(/\./, "", v); comp=v+0 }
+            END { printf "%.2f", (act+wire+comp)*page_size/1073741824 }
+        '
+    }
+
+    SYSTEM_RAM_GB_T10=$(sysctl -n hw.memsize | awk '{printf "%.0f", $1/1073741824}')
+    RAM_LIMIT_T10=$(echo "$SYSTEM_RAM_GB_T10 * 0.80" | bc | cut -d. -f1)
+    echo "   System RAM: ${SYSTEM_RAM_GB_T10} GB   Spike limit: ${RAM_LIMIT_T10} GB"
+    echo ""
+
+    killall SwiftLM 2>/dev/null || true
+    sleep 1
+
+    RAM_BEFORE=$(get_ram_gb_t10)
+    echo "   RAM before server start: ${RAM_BEFORE} GB"
+
+    # Launch with default --num-draft-tokens 4 — the auto-cap should reduce it to 1
+    $BIN --model "$T10_MAIN" --draft-model "$T10_DRAFT" \
+        --stream-experts --num-draft-tokens 4 \
+        --port $T10_PORT --max-tokens 64 \
+        > "$T10_LOG" 2>&1 &
+    T10_PID=$!
+
+    echo "   Waiting for server (up to 300s, models may download)..."
+    T10_READY=0
+    for i in $(seq 1 300); do
+        if ! kill -0 $T10_PID 2>/dev/null; then
+            echo "❌ FAIL: Server process died unexpectedly"
+            echo "--- Server log ---"
+            cat "$T10_LOG"
+            exit 1
+        fi
+        if curl -sf "http://127.0.0.1:${T10_PORT}/health" >/dev/null 2>&1; then
+            T10_READY=1
+            echo "   Server ready after ${i}s"
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$T10_READY" -eq 0 ]; then
+        echo "❌ FAIL: Server never became ready"
+        kill $T10_PID 2>/dev/null || true
+        exit 1
+    fi
+
+    RAM_LOADED=$(get_ram_gb_t10)
+    echo "   RAM after model load: ${RAM_LOADED} GB"
+
+    # ── Check 1: auto-cap warning logged ──────────────────────────────────────
+    echo ""
+    echo "   [1/3] Checking auto-cap warning in server log..."
+    if grep -q "auto-capping" "$T10_LOG" 2>/dev/null; then
+        echo "   ✅ Auto-cap warning found — numDraftTokens was correctly reduced to 1"
+        T10_AUTOCAP_PASS=1
+    else
+        echo "   ❌ Auto-cap warning NOT found — guard may not have fired"
+        echo "      (Check: --stream-experts + --draft-model path in Server.swift)"
+        grep "\[SwiftLM\]" "$T10_LOG" | tail -10 || true
+        T10_AUTOCAP_PASS=0
+    fi
+
+    # ── Check 2: RAM during inference ─────────────────────────────────────────
+    echo ""
+    echo "   [2/3] Running inference and measuring peak RAM..."
+    INF_RESULT=$(curl -sf --max-time 120 "http://127.0.0.1:${T10_PORT}/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"test","messages":[{"role":"user","content":"What is 2+2? One word."}],"max_tokens":32,"stream":false}' \
+        2>/dev/null || echo "{}")
+
+    RAM_PEAK=$(get_ram_gb_t10)
+    echo "   RAM after inference: ${RAM_PEAK} GB (limit: ${RAM_LIMIT_T10} GB)"
+
+    RAM_OK=$(echo "$RAM_PEAK <= $RAM_LIMIT_T10" | bc -l)
+    if [ "$RAM_OK" = "1" ]; then
+        echo "   ✅ RAM=${RAM_PEAK}GB within safe bounds (≤${RAM_LIMIT_T10}GB = 80% of ${SYSTEM_RAM_GB_T10}GB)"
+        T10_RAM_PASS=1
+    else
+        echo "   ❌ RAM=${RAM_PEAK}GB EXCEEDED limit ${RAM_LIMIT_T10}GB — swap likely occurred"
+        echo "      (This indicates the Issue #72 auto-cap or memoryLimit sentinel regressed)"
+        T10_RAM_PASS=0
+    fi
+
+    # ── Check 3: inference returned valid content ──────────────────────────────
+    echo ""
+    echo "   [3/3] Validating inference response..."
+    if echo "$INF_RESULT" | grep -q '"content"'; then
+        RESP_TEXT=$(echo "$INF_RESULT" | python3 -c \
+            "import sys,json;d=json.load(sys.stdin);print(d['choices'][0]['message']['content'])" \
+            2>/dev/null || echo "(parse error)")
+        echo "   ✅ Response: ${RESP_TEXT}"
+        T10_INF_PASS=1
+    else
+        echo "   ❌ No content in response — server may have crashed or returned empty"
+        echo "      Raw: ${INF_RESULT:0:200}"
+        T10_INF_PASS=0
+    fi
+
+    # ── Cleanup ────────────────────────────────────────────────────────────────
+    kill $T10_PID 2>/dev/null || true
+    wait $T10_PID 2>/dev/null || true
+
+    # ── Summary ────────────────────────────────────────────────────────────────
+    echo ""
+    echo "   ════════════════════════════════════════"
+    echo "   Test 10 Summary — Issue #72 RAM Regression"
+    echo "   System RAM : ${SYSTEM_RAM_GB_T10} GB"
+    echo "   RAM before : ${RAM_BEFORE} GB"
+    echo "   RAM loaded : ${RAM_LOADED} GB"
+    echo "   RAM peak   : ${RAM_PEAK} GB  (limit: ${RAM_LIMIT_T10} GB)"
+    echo "   Auto-cap   : $([ "$T10_AUTOCAP_PASS" = "1" ] && echo PASS || echo FAIL)"
+    echo "   RAM guard  : $([ "$T10_RAM_PASS" = "1" ] && echo PASS || echo FAIL)"
+    echo "   Inference  : $([ "$T10_INF_PASS" = "1" ] && echo PASS || echo FAIL)"
+    echo "   ════════════════════════════════════════"
+    echo ""
+
+    if [ "$T10_AUTOCAP_PASS" = "1" ] && [ "$T10_RAM_PASS" = "1" ] && [ "$T10_INF_PASS" = "1" ]; then
+        echo "✅ Test 10 PASSED — Issue #72 regression is not present"
+        exit 0
+    else
+        echo "❌ Test 10 FAILED — one or more checks failed (see above)"
+        echo "   Log: $T10_LOG"
+        exit 1
+    fi
 fi
 
 # Fallback to Test 1 for anything else

@@ -1368,8 +1368,9 @@ func handleChatCompletion(
         case "assistant":
             var formattedToolCalls: [[String: any Sendable]]? = nil
             if let tc = msg.tool_calls, !tc.isEmpty {
-                formattedToolCalls = tc.map { call in
+                formattedToolCalls = tc.enumerated().map { (index, call) in
                     [
+                        "index": index,
                         "id": call.id,
                         "type": call.type,
                         "function": [

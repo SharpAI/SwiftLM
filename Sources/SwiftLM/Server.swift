@@ -1904,8 +1904,6 @@ func handleChatStreaming(
                     switch info.stopReason {
                     case .length:
                         reason = "length"
-                    case .error:
-                        reason = "error"
                     case .cancelled, .stop:
                         reason = hasToolCalls ? "tool_calls" : "stop"
                     }
@@ -2266,8 +2264,6 @@ func handleTextStreaming(
                     switch info.stopReason {
                     case .length:
                         reason = "length"
-                    case .error:
-                        reason = "error"
                     case .cancelled, .stop:
                         reason = "stop"
                     }

@@ -610,7 +610,11 @@ public final class InferenceEngine: ObservableObject {
                     continuation.yield(GenerationToken(text: "\n\n[Error: \(error.localizedDescription)]"))
                 }
 
-                if case .error = self.state {
+                if let latchedError = SSDStreamingErrorLatch.shared.consume() {
+                    let msg = "Model weights are corrupted or incomplete. Please re-download the model."
+                    print("[InferenceEngine] Latched SSD error after generation: \(latchedError.localizedDescription)")
+                    self.markModelCorrupted(modelId: self.currentModelId, message: msg)
+                } else if case .error = self.state {
                     // Already in error state from catch block above
                 } else {
                     self.state = self.currentModelId.map { .ready(modelId: $0) } ?? .idle

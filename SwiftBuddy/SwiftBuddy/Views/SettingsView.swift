@@ -838,15 +838,14 @@ struct SettingsView: View {
         if let seed = cfg.seed {
             parts.append("--seed \(seed)")
         }
-        if srv.parallelSlots > 1 {
-            parts.append("--parallel \(srv.parallelSlots)")
+        if srv.startupConfiguration.parallelSlots > 1 {
+            parts.append("--parallel \(srv.startupConfiguration.parallelSlots)")
         }
         if !srv.startupConfiguration.apiKey.isEmpty {
             parts.append("--api-key <redacted>")
         }
 
-        return "swift run SwiftLM " + parts.joined(separator: " \\
-  ")
+        return "swift run SwiftLM " + parts.joined(separator: " \\\n  ")
     }
 
     private func copyCLI() {

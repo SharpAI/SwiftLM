@@ -18,6 +18,7 @@ struct SettingsView: View {
     @State private var selectedTab: SettingsTab = .generation
     @State private var draftServerConfiguration = ServerStartupConfiguration.load()
     @State private var showRestartNotification = false
+    @State private var endpointCopied = false
     @State private var serverSaveMessage = "Server settings saved"
     @State private var restartNotificationRequiresAction = false
 
@@ -264,14 +265,57 @@ struct SettingsView: View {
         ScrollView {
             VStack(spacing: 16) {
                 parameterCard("Local API Server") {
-                    HStack {
-                        Label(server.isOnline ? "Online" : "Offline", systemImage: "network")
-                            .foregroundStyle(server.isOnline ? SwiftBuddyTheme.success : SwiftBuddyTheme.textSecondary)
-                            .font(.callout.weight(.medium))
-                        Spacer()
-                        Text("\(server.host):\(server.port)")
-                            .foregroundStyle(SwiftBuddyTheme.textSecondary)
-                            .font(.callout.monospacedDigit())
+                    // ── Endpoint URL card (tap to copy) ─────────────────────
+                    let endpointURL = "http://\(server.host):\(server.port)"
+                    Button {
+                        copyEndpoint(endpointURL)
+                    } label: {
+                        HStack(spacing: 12) {
+                            // Status dot
+                            Circle()
+                                .fill(server.isOnline ? SwiftBuddyTheme.success : SwiftBuddyTheme.textTertiary)
+                                .frame(width: 8, height: 8)
+                                .shadow(color: server.isOnline ? SwiftBuddyTheme.success.opacity(0.6) : .clear,
+                                        radius: 4)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(server.isOnline ? "Online" : "Offline")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(server.isOnline ? SwiftBuddyTheme.success : SwiftBuddyTheme.textTertiary)
+                                Text(endpointURL)
+                                    .font(.system(.callout, design: .monospaced))
+                                    .foregroundStyle(SwiftBuddyTheme.textPrimary)
+                            }
+
+                            Spacer()
+
+                            // Copy / confirm icon
+                            Image(systemName: endpointCopied ? "checkmark" : "doc.on.doc")
+                                .font(.caption)
+                                .foregroundStyle(endpointCopied ? SwiftBuddyTheme.success : SwiftBuddyTheme.textTertiary)
+                                .animation(.easeInOut(duration: 0.2), value: endpointCopied)
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity)
+                        .background(SwiftBuddyTheme.background.opacity(0.6))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(
+                                    server.isOnline
+                                        ? SwiftBuddyTheme.success.opacity(0.3)
+                                        : Color.white.opacity(0.07),
+                                    lineWidth: 1
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    // Quick-use hint for external tools
+                    if server.isOnline {
+                        Text("Compatible with OpenAI SDK, LM Studio, Continue, Cursor")
+                            .font(.caption2)
+                            .foregroundStyle(SwiftBuddyTheme.textTertiary)
                     }
 
                     toggleRow(
@@ -597,6 +641,19 @@ struct SettingsView: View {
                 .strokeBorder(SwiftBuddyTheme.warning.opacity(0.45), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+    }
+
+    private func copyEndpoint(_ url: String) {
+        #if os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url, forType: .string)
+        #else
+        UIPasteboard.general.string = url
+        #endif
+        withAnimation { endpointCopied = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            withAnimation { endpointCopied = false }
+        }
     }
 
     private func saveServerConfiguration() {

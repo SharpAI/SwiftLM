@@ -42,6 +42,7 @@ public enum DFlashDumper {
         eval(floatArr)
 
         let shape = (0..<floatArr.ndim).map { floatArr.dim($0) }
+        let totalElements = shape.reduce(1, *)
 
         // Build spec-compliant .npy header: shape must be a Python tuple,
         // spaces pad before the final newline byte.

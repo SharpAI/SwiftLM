@@ -452,6 +452,9 @@ struct MLXServer: AsyncParsableCommand {
            let profile = mainModelProfile ?? ModelProfiler.profile(modelDirectory: modelDir, modelId: modelId)
            if let profile = profile {
             let system = ModelProfiler.systemProfile()
+            if system.swapUsedGB > 1.0 {
+                print("[SwiftLM] ⚠️  High swap usage detected: \(String(format: "%.1f", system.swapUsedGB))GB used. Performance may be degraded.")
+            }
             let contextSize = self.ctxSize ?? 4096
             let plan = ModelProfiler.plan(model: profile, system: system, contextSize: contextSize, draftWeightBytes: draftFootprintBytes)
             partitionPlan = plan
@@ -471,7 +474,7 @@ struct MLXServer: AsyncParsableCommand {
                     // SSD Streaming: expert weights are mmap'd from SSD via the OS page cache.
                     // No swap involved — the page cache evicts stale expert pages cleanly.
                     // draftFootprintBytes pre-computed once above (Copilot review).
-                    let physicalBudget = computeSSDMemoryBudget(totalRAMBytes: system.totalRAMBytes, draftWeightBytes: draftFootprintBytes)
+                    let physicalBudget = computeSSDMemoryBudget(totalRAMBytes: system.totalRAMBytes, isMoE: profile.isMoE, draftWeightBytes: draftFootprintBytes)
                     Memory.cacheLimit = physicalBudget
                     print("[SwiftLM] 💾 Memory strategy: SSD STREAMING (page-cache managed, \(physicalBudget / (1024*1024*1024))GB RAM budget, no swap)")
                 } else {
@@ -482,7 +485,7 @@ struct MLXServer: AsyncParsableCommand {
             case .layerPartitioned:
                 if self.streamExperts {
                     // draftFootprintBytes pre-computed once above (Copilot review).
-                    let physicalBudget = computeSSDMemoryBudget(totalRAMBytes: system.totalRAMBytes, draftWeightBytes: draftFootprintBytes)
+                    let physicalBudget = computeSSDMemoryBudget(totalRAMBytes: system.totalRAMBytes, isMoE: profile.isMoE, draftWeightBytes: draftFootprintBytes)
                     Memory.cacheLimit = physicalBudget
                     print("[SwiftLM] 💾 Memory strategy: SSD STREAMING (page-cache managed, \(physicalBudget / (1024*1024*1024))GB RAM budget, no swap)")
                 } else {
@@ -726,7 +729,7 @@ struct MLXServer: AsyncParsableCommand {
                     print("[SwiftLM] 🚀 PAPPS 16-Worker Thread Pool prefetcher enabled!")
                 }
             } else {
-                print("[SwiftLM] ⚠️  Model does not support SSD expert streaming")
+                print("[SwiftLM] ⚠️  Model does not support SSD expert streaming (Check architecture for QuantizedSwitchLinear layers)")
             }
         }
 
@@ -1058,9 +1061,10 @@ struct ServerConfig: Sendable {
 ///     Subtracted so the draft model's resident pages don't push the main model's
 ///     page cache over the physical limit and trigger swap (Issue #72).
 /// - Returns: The recommended `Memory.cacheLimit` value in bytes.
-func computeSSDMemoryBudget(totalRAMBytes: UInt64, draftWeightBytes: Int = 0) -> Int {
+func computeSSDMemoryBudget(totalRAMBytes: UInt64, isMoE: Bool = false, draftWeightBytes: Int = 0) -> Int {
     let osHeadroom = 4 * 1024 * 1024 * 1024  // 4 GB for OS + system processes
-    let raw = Int(Double(totalRAMBytes) * 0.85) - osHeadroom - draftWeightBytes
+    let moeBuffer = isMoE ? 2 * 1024 * 1024 * 1024 : 0 // 2 GB safety buffer for dynamic expert activation
+    let raw = Int(Double(totalRAMBytes) * 0.85) - osHeadroom - draftWeightBytes - moeBuffer
     return max(raw, 2 * 1024 * 1024 * 1024)  // floor at 2 GB
 }
 
@@ -1180,24 +1184,7 @@ actor PromptCache {
         if cache.contains(where: { $0 is MambaCache }) {
             return
         }
-        let P = tokens.count
-        // For attention KVCacheSimple layers, the state tensor is [B, H, T, D] with a
-        // pre-allocated T that can exceed the actual prompt length P. If we store the
-        // full over-sized buffer, restore()'s trim() by (cached.tokens.count - matchLen)
-        // still leaves T - P slots of garbage beyond the valid prefix. Slice T to P at
-        // save time so cached.tokens.count === cached state's T.
-        let states: [[MLXArray]] = cache.map { layer -> [MLXArray] in
-            let s = layer.state
-            if layer is KVCacheSimple {
-                return s.map { arr -> MLXArray in
-                    guard arr.ndim >= 3 else { return arr }
-                    let T = arr.dim(2)
-                    if T > P { return arr[.ellipsis, ..<P, 0...] }
-                    return arr
-                }
-            }
-            return s
-        }
+        let states = cache.map { $0.state }
         let metaStates = cache.map { $0.metaState }
         // Materialize all lazy MLX arrays so they survive cache mutations
         let allArrays = states.flatMap { $0 }
@@ -1223,20 +1210,6 @@ actor PromptCache {
             misses += 1
             return nil
         }
-        // ── Recurrent-layer safety gate ──
-        // MambaCache (and other recurrent caches) store a 2-D hidden state with no
-        // T dimension, so the dim(2) read below would crash. Hybrid Mamba/attention
-        // models (Qwen-Next, Mamba-2, etc.) can't be safely prefix-restored because
-        // the recurrent hidden state was computed over the WHOLE previous sequence
-        // and there is no trim(excess) operator for it. Treat any cache containing
-        // a recurrent layer as a miss before we touch anything.
-        let hasRecurrentLayer = cache.contains { layer in
-            !(layer is KVCacheSimple) && !(String(describing: type(of: layer)).contains("Rotating"))
-        }
-        if hasRecurrentLayer {
-            misses += 1
-            return nil
-        }
         // Token-by-token longest common prefix scan
         var matchLen = 0
         for (a, b) in zip(cached.tokens, newTokens) {
@@ -1257,7 +1230,6 @@ actor PromptCache {
             // dim(2) = T = the number of cached tokens for that layer.
             let minCachedSeqLen = cached.states.map { arrays -> Int in
                 guard let firstArray = arrays.first else { return 0 }
-                guard firstArray.ndim >= 3 else { return 0 }
                 return firstArray.dim(2)  // T dimension
             }.min() ?? 0
             if excess >= minCachedSeqLen {
@@ -1368,9 +1340,8 @@ func handleChatCompletion(
         case "assistant":
             var formattedToolCalls: [[String: any Sendable]]? = nil
             if let tc = msg.tool_calls, !tc.isEmpty {
-                formattedToolCalls = tc.enumerated().map { (index, call) in
+                formattedToolCalls = tc.map { call in
                     [
-                        "index": index,
                         "id": call.id,
                         "type": call.type,
                         "function": [
@@ -1553,25 +1524,13 @@ func handleChatCompletion(
         // raw <|image|>/<|audio|> token embeddings instead of the projected features.
         let isMultimodalRequest = lmInput.image != nil || lmInput.audio != nil
 
-        // ── Decision branch ──
-        // Speculative decoding is CHECKED FIRST because a cache-hit rollback
-        // corrupts the draft model's KV state (draft and main model cycle tokens
-        // in lock-step). We'd rather pay the prefill than emit garbage.
-        //
-        // Skip prompt cache for quantized-KV requests: the prompt cache stores KV state
-        // produced with KVCacheSimple; restoring it into a QuantizedKVCache (or vice-versa)
+        // Try to restore via token-by-token prefix match (llama-server style).
+        // Skip for quantized-KV requests: the prompt cache stores KV state produced
+        // with KVCacheSimple; restoring it into a QuantizedKVCache (or vice-versa)
         // is unsafe and produces incorrect results or runtime failures.
         let skipPromptCache = isMultimodalRequest || params.kvBits != nil
         var stream: AsyncStream<Generation>
-        if let draftRef = draftModelRef {
-            // Speculative decoding path: draft model generates candidates, main model verifies.
-            // Bypass prompt cache to avoid draft/main KV drift on partial-match restores.
-            print("[SwiftLM] Using speculative decoding (\(numDraftTokens) draft tokens/round)")
-            stream = try MLXLMCommon.generate(
-                input: lmInput, cache: cache, parameters: params, context: context,
-                draftModel: draftRef.model, numDraftTokens: numDraftTokens
-            )
-        } else if !skipPromptCache, let cachedCount = await promptCache.restore(newTokens: promptTokens, into: cache) {
+        if !skipPromptCache, let cachedCount = await promptCache.restore(newTokens: promptTokens, into: cache) {
             // Cache hit: KV state is pre-populated up to cachedCount tokens.
             // Only compute the remaining (new) tokens.
             var startIndex = cachedCount

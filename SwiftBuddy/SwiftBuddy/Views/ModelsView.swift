@@ -12,7 +12,6 @@ struct ModelsView: View {
     @State private var showHFSearch = false
     @State private var showManagement = false
     @State private var device = DeviceProfile.current
-    @State private var deleteErrorMessage: String?
 
     private var dm: ModelDownloadManager { engine.downloadManager }
 
@@ -40,34 +39,6 @@ struct ModelsView: View {
                         }
                     }
 
-                    // ── 2b. Incomplete (resumable) downloads ────────────────
-                    if !dm.incompleteDownloads.isEmpty {
-                        sectionHeader("Resume Downloads")
-                        VStack(spacing: 0) {
-                            ForEach(dm.incompleteDownloads) { incomplete in
-                                IncompleteDownloadRow(
-                                    incomplete: incomplete,
-                                    onResume: { dm.resumeDownload(modelId: incomplete.id) },
-                                    onDelete: { deleteModel(incomplete.id) }
-                                )
-                                .padding(.horizontal)
-                                if incomplete.id != dm.incompleteDownloads.last?.id {
-                                    Divider()
-                                        .background(SwiftBuddyTheme.divider)
-                                        .padding(.leading, 72)
-                                }
-                            }
-                        }
-                        .background(SwiftBuddyTheme.surface.opacity(0.60))
-                        .clipShape(RoundedRectangle(cornerRadius: SwiftBuddyTheme.radiusMedium))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: SwiftBuddyTheme.radiusMedium)
-                                .strokeBorder(SwiftBuddyTheme.warning.opacity(0.20), lineWidth: 1)
-                        )
-                        .padding(.horizontal)
-                        .padding(.bottom, 10)
-                    }
-
                     // ── 3. Downloaded models ───────────────────────────────
                     if !dm.downloadedModels.isEmpty {
                         sectionHeader("Downloaded (\(dm.downloadedModels.count))")
@@ -84,7 +55,7 @@ struct ModelsView: View {
                                     entry: entry,
                                     isActive: isActive,
                                     onLoad: { Task { await engine.load(modelId: downloaded.id) } },
-                                    onDelete: { deleteModel(downloaded.id) }
+                                    onDelete: { try? dm.delete(downloaded.id) }
                                 )
                                 .padding(.horizontal)
                                 if downloaded.id != dm.downloadedModels.last?.id {
@@ -207,25 +178,6 @@ struct ModelsView: View {
         .sheet(isPresented: $showManagement) {
             ModelManagementView()
                 .environmentObject(engine)
-        }
-        .alert(
-            "Delete Failed",
-            isPresented: Binding(
-                get: { deleteErrorMessage != nil },
-                set: { if !$0 { deleteErrorMessage = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(deleteErrorMessage ?? "")
-        }
-    }
-
-    private func deleteModel(_ modelId: String) {
-        do {
-            try dm.delete(modelId)
-        } catch {
-            deleteErrorMessage = error.localizedDescription
         }
     }
 
@@ -502,71 +454,6 @@ private struct DownloadProgressCard: View {
         }
         .padding(14)
         .glassCard(cornerRadius: SwiftBuddyTheme.radiusMedium)
-    }
-}
-
-// MARK: — Incomplete Download Row
-
-private struct IncompleteDownloadRow: View {
-    let incomplete: ModelStorage.IncompleteDownload
-    let onResume: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(SwiftBuddyTheme.warning.opacity(0.15))
-                    .frame(width: 44, height: 44)
-                Image(systemName: "arrow.clockwise.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(SwiftBuddyTheme.warning)
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(incomplete.id.components(separatedBy: "/").last ?? incomplete.id)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(SwiftBuddyTheme.textPrimary)
-                    .lineLimit(1)
-                HStack(spacing: 6) {
-                    Text(formatBytes(incomplete.downloadedBytes) + " downloaded")
-                        .font(.caption)
-                        .foregroundStyle(SwiftBuddyTheme.textSecondary)
-                    Text("·")
-                        .foregroundStyle(SwiftBuddyTheme.textTertiary)
-                        .font(.caption)
-                    Text("Incomplete")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(SwiftBuddyTheme.warning)
-                }
-            }
-
-            Spacer()
-
-            Button(action: onResume) {
-                Label("Resume", systemImage: "arrow.down.circle.fill")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(SwiftBuddyTheme.warning, in: Capsule())
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.vertical, 12)
-        .contentShape(Rectangle())
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(role: .destructive, action: onDelete) {
-                Label("Delete", systemImage: "trash")
-            }
-        }
-    }
-
-    private func formatBytes(_ bytes: Int64) -> String {
-        let gb = Double(bytes) / 1_073_741_824
-        let mb = Double(bytes) / 1_048_576
-        if gb >= 1.0 { return String(format: "%.1f GB", gb) }
-        return String(format: "%.0f MB", mb)
     }
 }
 

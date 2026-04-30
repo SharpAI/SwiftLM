@@ -497,9 +497,15 @@ public final class InferenceEngine: ObservableObject {
 /// before they are re-submitted to the Jinja chat-template renderer on subsequent
 /// turns — Qwen3 (and similar "thinking" models) raise TemplateException error 1
 /// when prior assistant turns contain raw thinking tags.
-private func stripThinkingTags(from text: String) -> String {
+///
+/// Trimming is applied only when at least one tag span was actually removed so
+/// that assistant messages without thinking content are returned byte-for-byte
+/// (preserving leading spaces, code-block indentation, etc.).
+func stripThinkingTags(from text: String) -> String {
     var result = text
+    var stripped = false
     while let openRange = result.range(of: "<think>") {
+        stripped = true
         if let closeRange = result.range(of: "</think>", range: openRange.lowerBound..<result.endIndex) {
             // Include the optional newline that immediately follows </think>
             var endIdx = closeRange.upperBound
@@ -513,7 +519,9 @@ private func stripThinkingTags(from text: String) -> String {
             break
         }
     }
-    return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    // Only trim surrounding whitespace that was introduced by stripping;
+    // leave untouched messages that contained no think tags.
+    return stripped ? result.trimmingCharacters(in: .whitespacesAndNewlines) : result
 }
 
 extension InferenceEngine {

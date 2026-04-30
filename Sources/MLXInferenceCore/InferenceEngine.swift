@@ -488,6 +488,36 @@ public final class InferenceEngine: ObservableObject {
     }
 
     // MARK: — Generation
+}
+
+// MARK: — Helpers
+
+/// Removes all `<think>…</think>` spans from `text`, including the closing tag's
+/// trailing newline when present.  Used to sanitise assistant history messages
+/// before they are re-submitted to the Jinja chat-template renderer on subsequent
+/// turns — Qwen3 (and similar "thinking" models) raise TemplateException error 1
+/// when prior assistant turns contain raw thinking tags.
+private func stripThinkingTags(from text: String) -> String {
+    var result = text
+    while let openRange = result.range(of: "<think>") {
+        if let closeRange = result.range(of: "</think>", range: openRange.lowerBound..<result.endIndex) {
+            // Include the optional newline that immediately follows </think>
+            var endIdx = closeRange.upperBound
+            if endIdx < result.endIndex && result[endIdx] == "\n" {
+                endIdx = result.index(after: endIdx)
+            }
+            result.removeSubrange(openRange.lowerBound..<endIdx)
+        } else {
+            // Unclosed <think> — strip from opening tag to end of string
+            result.removeSubrange(openRange.lowerBound...)
+            break
+        }
+    }
+    return result.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+extension InferenceEngine {
+    // MARK: — Generation (continued)
 
     public nonisolated func generate(
         messages: [ChatMessage],
@@ -515,9 +545,20 @@ public final class InferenceEngine: ObservableObject {
                         if msg.role == .system {
                             pendingSystemContext += msg.content + "\n\n"
                         } else {
-                            var roleRaw = msg.role.rawValue
-                            if roleRaw == "assistant" { roleRaw = "model" }
+                            // Use the canonical role name — Qwen3 (and most models) use
+                            // "assistant", not "model". The "model" alias is Gemma-specific
+                            // and breaks Qwen3's Jinja chat template on multi-turn history.
+                            let roleRaw = msg.role.rawValue  // "user" | "assistant" | "tool"
                             var content = msg.content
+                            
+                            // Strip <think>…</think> blocks from prior assistant turns.
+                            // If the model generated thinking content on a previous turn and
+                            // it was not already split into thinkingContent, the raw tags will
+                            // be present in `content`. Feeding them back into the Jinja template
+                            // on the next request causes TemplateException error 1 on Qwen3.
+                            if msg.role == .assistant {
+                                content = stripThinkingTags(from: content)
+                            }
                             
                             if roleRaw == "user" && !pendingSystemContext.isEmpty {
                                 content = "[SYSTEM CONTEXT / PERSONA DATA]\n" + pendingSystemContext + "\n[END CONTEXT]\n\n" + content

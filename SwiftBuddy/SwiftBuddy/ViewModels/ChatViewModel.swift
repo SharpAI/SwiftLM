@@ -12,8 +12,14 @@ final class ChatViewModel: ObservableObject {
     @Published var streamingText: String = ""
     @Published var thinkingText: String? = nil
     @Published var isGenerating: Bool = false
-    @Published var config: GenerationConfig = .default
-    @Published var systemPrompt: String = ""
+    @Published var config: GenerationConfig = .load() {
+        didSet { config.save() }
+    }
+    @Published var systemPrompt: String = {
+        UserDefaults.standard.string(forKey: "swiftlm.systemPrompt") ?? ""
+    }() {
+        didSet { UserDefaults.standard.set(systemPrompt, forKey: "swiftlm.systemPrompt") }
+    }
     public var currentWing: String? = nil
     weak var engine: InferenceEngine?
     var modelContext: ModelContext?

@@ -235,8 +235,8 @@ struct SettingsView: View {
 
                 // Reset button
                 Button(role: .destructive) {
-                    viewModel.config = .default
-                    viewModel.systemPrompt = ""
+                    viewModel.config = .default   // didSet triggers config.save()
+                    viewModel.systemPrompt = ""    // didSet clears UserDefaults key
                 } label: {
                     HStack {
                         Image(systemName: "arrow.counterclockwise")

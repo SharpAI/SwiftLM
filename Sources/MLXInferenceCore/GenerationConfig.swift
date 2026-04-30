@@ -2,7 +2,10 @@
 import Foundation
 
 /// Configuration for a single generation request.
-public struct GenerationConfig: Sendable {
+///
+/// Conforms to `Codable` so settings can be persisted across app launches
+/// via `save()` / `load()` using `UserDefaults`.
+public struct GenerationConfig: Sendable, Codable {
     public var maxTokens: Int
     public var temperature: Float
     public var topP: Float
@@ -61,4 +64,22 @@ public struct GenerationConfig: Sendable {
     }
 
     public static let `default` = GenerationConfig()
+
+    // MARK: — Persistence
+
+    private static let storageKey = "swiftlm.generationConfig"
+
+    /// Persist this config to `UserDefaults`.
+    public func save() {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        UserDefaults.standard.set(data, forKey: Self.storageKey)
+    }
+
+    /// Load previously persisted config, falling back to `.default`.
+    public static func load() -> GenerationConfig {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode(GenerationConfig.self, from: data)
+        else { return .default }
+        return decoded
+    }
 }

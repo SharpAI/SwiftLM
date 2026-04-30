@@ -594,13 +594,23 @@ extension InferenceEngine {
                     var outputText = ""
                     var tokenCount = 0
 
-                    let userInput = UserInput(messages: mlxMessages)
+                    // Pass enable_thinking to the Jinja chat template so the model
+                    // actually generates <think> blocks when thinking mode is ON.
+                    // Without this kwarg, Qwen3's template defaults to thinking=false
+                    // regardless of what the UI toggle shows.
+                    let additionalContext: [String: any Sendable]? = config.enableThinking
+                        ? ["enable_thinking": true]
+                        : ["enable_thinking": false]
+                    let userInput = UserInput(
+                        messages: mlxMessages,
+                        additionalContext: additionalContext
+                    )
                     let lmInput = try await container.prepare(input: userInput)
                     
-                    // Approximate the input token size (as LMInput wrapper blocks direct inspection without private API)
-                    // MLX often counts 1 word roughly as 1.3 tokens. 
-                    let stringLength = mlxMessages.map { ($0["content"] ?? "").count }.reduce(0, +)
-                    let baseTokens = Int(Double(stringLength) / 3.5)
+                    // Use the real token count from the prepared LMInput rather than
+                    // a character-length heuristic (which was consistently off by 2–3×
+                    // for CJK and code content).
+                    let baseTokens = lmInput.text.tokens.shape[0]
                     self.activeContextTokens = baseTokens
                     
                     // maxContextWindow is already set during loadModel() from config.json

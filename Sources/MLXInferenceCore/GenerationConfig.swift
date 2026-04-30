@@ -1,18 +1,16 @@
 // GenerationConfig.swift — SwiftLM inference parameters
 import Foundation
 
-/// Configuration for a single generation request.
+/// Per-request generation parameters, persisted across app launches via UserDefaults.
 ///
-/// Conforms to `Codable` so settings can be persisted across app launches
-/// via `save()` / `load()` using `UserDefaults`.
+/// ### Field classification
+/// **Per-request** (applied on every `generate()` call — no reload needed):
+///   temperature, topP, topK, minP, repetitionPenalty, seed, enableThinking,
+///   prefillSize, kvBits, kvGroupSize, turboKV
 ///
-/// ### Notes on removed fields
-/// - `streamExperts` was removed: expert streaming is a **load-time** flag
-///   automatically derived from `ModelCatalog.isMoE` inside `InferenceEngine.load()`.
-///   Exposing it as a per-request toggle had no effect and misled users.
-/// - `turboKV` was removed: the PolarQuant+QJL path was never wired into
-///   `GenerateParameters` or the mlx-lm call chain. Use `kvBits: 4` or `kvBits: 8`
-///   for KV-cache quantisation instead.
+/// **Load-time** (requires model reload to take effect):
+///   streamExperts — controls SSD expert streaming for MoE and large models.
+///   Stored here for persistence but applied by InferenceEngine at load time.
 public struct GenerationConfig: Sendable, Codable {
     public var maxTokens: Int
     public var temperature: Float
@@ -22,7 +20,7 @@ public struct GenerationConfig: Sendable, Codable {
     public var repetitionPenalty: Float
 
     /// Optional RNG seed for reproducible outputs.
-    /// When non-nil, `MLX.seed(UInt32(seed!))` is called before each generation.
+    /// When non-nil, `MLX.seed(seed)` is called before each generation.
     public var seed: UInt64?
 
     public var enableThinking: Bool
@@ -37,6 +35,21 @@ public struct GenerationConfig: Sendable, Codable {
     /// KV-cache quantization group size (default 64).
     public var kvGroupSize: Int
 
+    /// Enable 3-bit TurboQuant KV-cache compression (PolarQuant+QJL).
+    /// Compresses KV history older than 8192 tokens to ~3.5 bits/token.
+    /// Recommended for 100k+ context to halve KV RAM usage.
+    /// Applied per-request — no model reload needed.
+    public var turboKV: Bool
+
+    /// Enable SSD expert streaming for MoE (and any large) models.
+    /// When true, expert weights are mmap'd from NVMe and only active
+    /// expert pages reside in RAM during inference (Flash-MoE style).
+    /// ⚠️ LOAD-TIME flag: changes take effect on the next model load.
+    /// MoE models (isMoE == true) default to true automatically;
+    /// this flag lets users override that for non-catalog models or
+    /// force-disable streaming even on MoE models.
+    public var streamExperts: Bool
+
     public init(
         maxTokens: Int = 2048,
         temperature: Float = 0.6,
@@ -48,7 +61,9 @@ public struct GenerationConfig: Sendable, Codable {
         enableThinking: Bool = false,
         prefillSize: Int = 512,
         kvBits: Int? = nil,
-        kvGroupSize: Int = 64
+        kvGroupSize: Int = 64,
+        turboKV: Bool = false,
+        streamExperts: Bool = false
     ) {
         self.maxTokens = maxTokens
         self.temperature = temperature
@@ -61,6 +76,8 @@ public struct GenerationConfig: Sendable, Codable {
         self.prefillSize = prefillSize
         self.kvBits = kvBits
         self.kvGroupSize = kvGroupSize
+        self.turboKV = turboKV
+        self.streamExperts = streamExperts
     }
 
     public static let `default` = GenerationConfig()
@@ -69,13 +86,11 @@ public struct GenerationConfig: Sendable, Codable {
 
     private static let storageKey = "swiftlm.generationConfig"
 
-    /// Persist this config to `UserDefaults`.
     public func save() {
         guard let data = try? JSONEncoder().encode(self) else { return }
         UserDefaults.standard.set(data, forKey: Self.storageKey)
     }
 
-    /// Load previously persisted config, falling back to `.default`.
     public static func load() -> GenerationConfig {
         guard let data = UserDefaults.standard.data(forKey: storageKey),
               let decoded = try? JSONDecoder().decode(GenerationConfig.self, from: data)

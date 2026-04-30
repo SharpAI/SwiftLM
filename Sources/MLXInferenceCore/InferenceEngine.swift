@@ -331,10 +331,14 @@ public final class InferenceEngine: ObservableObject {
             // at load time — only active expert pages touch RAM during inference.
             var config = ModelConfiguration(id: modelId)
             let isMoE = ModelCatalog.all.first(where: { $0.id == modelId })?.isMoE ?? false
-            if isMoE {
+            // SSD expert streaming:
+            // - MoE catalog models default ON (required to fit in RAM)
+            // - User can override via GenerationConfig.streamExperts for custom/non-catalog models
+            // - isMoE acts as the default; user toggle overrides both ways
+            let shouldStream = isMoE || GenerationConfig.load().streamExperts
+            if shouldStream {
                 config.lazyLoad = true
                 let modelDir = ModelStorage.snapshotDirectory(for: modelId)
-                // directIO=true on macOS (5 GB/s NVMe pread), false on iOS (mmap fallback)
                 ExpertStreamingConfig.shared.activate(
                     modelDirectory: modelDir,
                     useDirectIO: {
@@ -345,6 +349,9 @@ public final class InferenceEngine: ObservableObject {
                         #endif
                     }()
                 )
+                print("[InferenceEngine] SSD expert streaming: enabled (isMoE=\(isMoE), userOverride=\(GenerationConfig.load().streamExperts))")
+            } else {
+                print("[InferenceEngine] SSD expert streaming: disabled")
             }
 
             let downloader = HubDownloader(hub: hub)
@@ -619,7 +626,21 @@ extension InferenceEngine {
                     self.activeContextTokens = baseTokens
                     
                     // maxContextWindow is already set during loadModel() from config.json
-                    
+
+                    // TurboKV: enable 3-bit PolarQuant+QJL on every KVCacheSimple layer
+                    // before generation. Must be set on the model (not the cache) so the
+                    // cache inherits the flag when newCache() is called inside generate().
+                    if config.turboKV {
+                        await container.perform { ctx in
+                            for module in ctx.model.modules() {
+                                if let simple = module as? KVCacheSimple {
+                                    simple.turboQuantEnabled = true
+                                }
+                            }
+                        }
+                        print("[InferenceEngine] TurboKV enabled for this request")
+                    }
+
                     let stream: AsyncStream<Generation> = try await container.generate(
                         input: lmInput,
                         parameters: params

@@ -193,13 +193,16 @@ struct SettingsView: View {
 
                 parameterCard("Output") {
                     sliderRow(
-                        label: "Max Tokens", icon: "text.word.spacing",
+                        label: "Max Response Tokens", icon: "text.word.spacing",
                         value: Binding(
                             get: { Double(viewModel.config.maxTokens) },
                             set: { viewModel.config.maxTokens = Int($0) }
                         ),
                         range: 128...max(16384.0, Double(engine.maxContextWindow)), step: 128, format: "%.0f",
-                        tint: SwiftBuddyTheme.accent
+                        tint: SwiftBuddyTheme.accent,
+                        hint: engine.maxContextWindow > 0
+                            ? "Max output per reply. Model context window: \(engine.maxContextWindow / 1000)K tokens"
+                            : "Max tokens generated per response (context window shown once model loads)"
                     )
                     sliderRow(
                         label: "Repetition Penalty", icon: "repeat.circle",
@@ -514,41 +517,57 @@ struct SettingsView: View {
                 }
 
                 parameterCard("Advanced Engine") {
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: "bolt.circle.fill")
-                            .foregroundStyle(SwiftBuddyTheme.accentSecondary)
-                            .font(.callout)
-                            .padding(.top, 2)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("SSD Streaming — automatic for MoE models")
-                                .font(.callout.weight(.medium))
-                                .foregroundStyle(SwiftBuddyTheme.textPrimary)
-                            Text("Expert weight streaming is enabled automatically when you load a Mixture-of-Experts model (e.g. Qwen 3.5 35B MoE). No manual toggle is needed.")
-                                .font(.caption2)
-                                .foregroundStyle(SwiftBuddyTheme.textTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .padding(.vertical, 2)
+                    // ── TurboKV (per-request, no reload needed) ──────────────────────────
+                    toggleRow(
+                        label: "TurboKV Compression", icon: "memorychip",
+                        isOn: $viewModel.config.turboKV,
+                        tint: SwiftBuddyTheme.warning,
+                        hint: "3-bit PolarQuant+QJL compression for KV history >8K tokens. Halves long-context RAM — applied per request"
+                    )
 
                     Divider().background(SwiftBuddyTheme.divider)
 
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: "memorychip")
-                            .foregroundStyle(SwiftBuddyTheme.warning)
-                            .font(.callout)
-                            .padding(.top, 2)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("KV Cache Quantisation")
-                                .font(.callout.weight(.medium))
-                                .foregroundStyle(SwiftBuddyTheme.textPrimary)
-                            Text("Set KV Bits to 4 or 8 in the KV Cache card below to compress the attention cache. Reduces VRAM at the cost of slight quality.")
-                                .font(.caption2)
-                                .foregroundStyle(SwiftBuddyTheme.textTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
+                    // ── SSD Expert Streaming (load-time — shows reload prompt) ────
+                    VStack(alignment: .leading, spacing: 6) {
+                        toggleRow(
+                            label: "SSD Expert Streaming", icon: "externaldrive.fill",
+                            isOn: $viewModel.config.streamExperts,
+                            tint: SwiftBuddyTheme.accentSecondary,
+                            hint: "mmap expert weights from NVMe — only active expert pages stay in RAM. Auto-enabled for MoE catalog models."
+                        )
+                        if viewModel.config.streamExperts != (ModelCatalog.all.first(where: {
+                            if case .ready(let id) = engine.state { return $0.id == id } else { return false }
+                        })?.isMoE ?? false) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.clockwise.circle.fill")
+                                    .foregroundStyle(SwiftBuddyTheme.warning)
+                                    .font(.caption)
+                                Text("Reload model to apply this change")
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(SwiftBuddyTheme.warning)
+                                Spacer()
+                                Button("Reload") {
+                                    let currentId: String? = {
+                                        if case .ready(let id) = engine.state { return id }
+                                        return nil
+                                    }()
+                                    if let id = currentId {
+                                        Task {
+                                            engine.unload()
+                                            await engine.load(modelId: id)
+                                        }
+                                    }
+                                }
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(SwiftBuddyTheme.accent)
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 6)
+                            .background(SwiftBuddyTheme.warning.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                     }
-                    .padding(.vertical, 2)
                 }
                 #if os(iOS)
                 parameterCard("iOS Performance") {

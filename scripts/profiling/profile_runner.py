@@ -18,7 +18,7 @@ CONFIGS = [
     {"name": "SSD + 16-Worker Prefetch", "flags": ["--stream-experts", "--ssd-prefetch"]}
 ]
 
-SWIFTLM_PATH = ".build/arm64-apple-macosx/release/SwiftLM"
+SWIFTLM_PATH = ".build/release/swiftlm"
 
 def get_physical_ram_gb():
     try:
@@ -320,10 +320,18 @@ def main():
         
         log_path = "./tmp/profile_server.log"
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        cmd = [SWIFTLM_PATH, "--model", model_id, "--port", "5422"] + config["flags"]
+        
+        # Use absolute paths and set CWD to binary directory to prevent "metallib not found" errors
+        abs_swiftlm_path = os.path.abspath(SWIFTLM_PATH)
+        swiftlm_dir = os.path.dirname(abs_swiftlm_path)
+        cmd = [abs_swiftlm_path, "--model", model_id, "--port", "5422"] + config["flags"]
+        
+        # Ensure METAL_LIBRARY_PATH is set so MLX can find its shaders
+        env = os.environ.copy()
+        env["METAL_LIBRARY_PATH"] = swiftlm_dir
         
         with open(log_path, "w") as root_log:
-            server_proc = subprocess.Popen(cmd, stdout=root_log, stderr=subprocess.STDOUT)
+            server_proc = subprocess.Popen(cmd, stdout=root_log, stderr=subprocess.STDOUT, env=env, cwd=swiftlm_dir)
         
         requires_dense_memory = "--stream-experts" not in config["flags"]
         is_healthy, overcommitted = poll_health(

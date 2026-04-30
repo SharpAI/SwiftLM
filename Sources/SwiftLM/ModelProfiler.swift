@@ -12,6 +12,16 @@
 
 import Foundation
 import MLX
+import Darwin
+
+// C-aligned struct for vm.swapusage (Darwin)
+struct xsw_usage {
+    var xsu_total: UInt64
+    var xsu_used: UInt64
+    var xsu_avail: UInt64
+    var xsu_pagesize: UInt32
+    var xsu_encrypted: Int32
+}
 
 // MARK: - Model Profile
 
@@ -80,8 +90,10 @@ struct SystemProfile: Sendable {
     let totalRAMBytes: UInt64
     let gpuArchitecture: String
     let recommendedWorkingSetBytes: Int
+    let swapUsedBytes: UInt64
 
     var totalRAMGB: Double { Double(totalRAMBytes) / 1e9 }
+    var swapUsedGB: Double { Double(swapUsedBytes) / 1e9 }
     /// RAM available for the model after reserving space for macOS (~4GB)
     var availableRAMGB: Double { max(0, totalRAMGB - 4.0) }
 }
@@ -204,6 +216,9 @@ enum ModelProfiler {
         let headDim: Int?
         let intermediateSize: Int?
         let vocabSize: Int?
+        let numExperts: Int?
+        let numExpertsAlt: Int?
+        let numExpertsPerTok: Int?
 
         enum CodingKeys: String, CodingKey {
             case numHiddenLayers = "num_hidden_layers"
@@ -213,6 +228,9 @@ enum ModelProfiler {
             case headDim = "head_dim"
             case intermediateSize = "intermediate_size"
             case vocabSize = "vocab_size"
+            case numExperts = "num_local_experts"
+            case numExpertsAlt = "num_experts"
+            case numExpertsPerTok = "num_experts_per_tok"
         }
     }
 
@@ -252,9 +270,9 @@ enum ModelProfiler {
         let quantBits = config.quantizationConfig?.bits ?? detectQuantBits(modelId: modelId)
 
         // Detect MoE
-        let isMoE = config.numExperts != nil && (config.numExperts ?? 0) > 1
-        let numExperts = config.numExperts
-        let numActiveExperts = config.numExpertsPerTok
+        let numExperts = config.numExperts ?? config.textConfig?.numExperts ?? config.textConfig?.numExpertsAlt
+        let isMoE = (numExperts ?? 0) > 1
+        let numActiveExperts = config.numExpertsPerTok ?? config.textConfig?.numExpertsPerTok
 
         // Measure weight file sizes on disk
         let weightSize = measureWeightFiles(directory: modelDirectory)
@@ -333,10 +351,17 @@ enum ModelProfiler {
         let physicalBudget = Int(Double(totalRAM) * 0.85) - (4 * 1024 * 1024 * 1024)
         let recommended = max(physicalBudget, Int(deviceInfo.memorySize))
 
+        // Get swap usage
+        var swap = xsw_usage(xsu_total: 0, xsu_used: 0, xsu_avail: 0, xsu_pagesize: 0, xsu_encrypted: 0)
+        var size = MemoryLayout<xsw_usage>.size
+        let result = sysctlbyname("vm.swapusage", &swap, &size, nil, 0)
+        let swapUsed = (result == 0) ? swap.xsu_used : 0
+
         return SystemProfile(
             totalRAMBytes: totalRAM,
             gpuArchitecture: deviceInfo.architecture,
-            recommendedWorkingSetBytes: recommended
+            recommendedWorkingSetBytes: recommended,
+            swapUsedBytes: swapUsed
         )
     }
 
@@ -349,24 +374,29 @@ enum ModelProfiler {
             : model.estimatedParamsB * (Double(model.quantBits) / 8.0)
         let draftGB = Double(draftWeightBytes) / 1e9
         let kvGB = model.kvCacheMemoryGB(contextLength: contextSize)
+        
+        // MoE Hardening: Reserve a safety buffer for expert activation spikes.
+        // Even with SSD streaming, some buffers are resident.
+        let moeBufferGB = model.isMoE ? 2.0 : 0.0
+        
         let overheadFactor = 1.2
-        let totalGB = (weightGB + draftGB) * overheadFactor + kvGB
+        let totalRequiredGB = (weightGB + draftGB) * overheadFactor + kvGB + moeBufferGB
         let availableGB = system.availableRAMGB
-        let overcommit = totalGB / availableGB
+        let overcommit = totalRequiredGB / availableGB
 
         var warnings: [String] = []
 
         // Determine strategy
         let strategy: PartitionStrategy
-        if totalGB <= availableGB * 0.85 {
+        if totalRequiredGB <= availableGB * 0.85 {
             strategy = .fullGPU
-        } else if totalGB <= availableGB {
+        } else if totalRequiredGB <= availableGB {
             strategy = .fullGPU
-            warnings.append("Model uses >\(Int(totalGB / availableGB * 100))% of available RAM. Performance may degrade under memory pressure.")
-        } else if totalGB <= availableGB * 2.0 {
+            warnings.append("Model uses >\(Int(totalRequiredGB / availableGB * 100))% of available RAM. Performance may degrade under memory pressure.")
+        } else if totalRequiredGB <= availableGB * 2.0 {
             strategy = .swapAssisted
             warnings.append("Model exceeds RAM by \(Int((overcommit - 1) * 100))%. macOS swap will be used. Expect 2-4× slowdown.")
-        } else if totalGB <= availableGB * 4.0 {
+        } else if totalRequiredGB <= availableGB * 4.0 {
             strategy = .layerPartitioned
             warnings.append("Model is \(String(format: "%.1f", overcommit))× system RAM. Layer partitioning needed for usable performance.")
             warnings.append("GPU/CPU layer split is not yet available in MLX Swift. Falling back to swap-assisted mode.")
@@ -431,7 +461,7 @@ enum ModelProfiler {
             strategy: strategy,
             weightMemoryGB: weightGB,
             kvCacheMemoryGB: kvGB,
-            totalRequiredGB: totalGB,
+            totalRequiredGB: totalRequiredGB,
             systemRAMGB: system.totalRAMGB,
             availableRAMGB: availableGB,
             overcommitRatio: overcommit,

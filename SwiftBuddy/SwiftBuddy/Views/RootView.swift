@@ -8,7 +8,6 @@ import MLXInferenceCore
 struct RootView: View {
     @EnvironmentObject private var engine: InferenceEngine
     @EnvironmentObject private var appearance: AppearanceStore
-    @EnvironmentObject private var server: ServerManager
     @Environment(\.modelContext) private var modelContext
     @StateObject private var viewModel = ChatViewModel()
     @StateObject private var registry = RegistryService.shared
@@ -18,24 +17,29 @@ struct RootView: View {
     @State private var selectedTab: Tab = .chat
 
     // macOS sheets
-
+    @State private var showModelPicker = false
     @State private var showSettings = false
     @State private var showPersonaDiscovery = false
     @State private var showMap = false
     @State private var showMindPalace = false
     @State private var showTextIngestion = false
     @State private var showModelManagement = false
-    @State private var lastDownloadLogBucket: Int?
     enum Tab { case chat, models, palace, mindPalace, miner, settings }
 
     var body: some View {
         Group {
             #if os(macOS)
             macOSLayout
+                .sheet(isPresented: $showModelPicker) {
+                    ModelPickerView(onSelect: { modelId in
+                        showModelPicker = false
+                        Task { await engine.load(modelId: modelId) }
+                    })
+                    .environmentObject(engine)
+                }
                 .sheet(isPresented: $showSettings) {
                     SettingsView(viewModel: viewModel)
                         .environmentObject(appearance)
-                        .environmentObject(server)
                 }
                 .sheet(isPresented: $showMap) {
                     PalaceVisualizerView()
@@ -52,9 +56,10 @@ struct RootView: View {
                 .sheet(isPresented: $showModelManagement) {
                     ModelManagementView()
                         .environmentObject(engine)
-                        .environmentObject(engine.downloadManager)
                 }
-
+                .onReceive(NotificationCenter.default.publisher(for: .showModelPicker)) { _ in
+                    showModelPicker = true
+                }
                 .onReceive(NotificationCenter.default.publisher(for: .showTextIngestion)) { _ in
                     showTextIngestion = true
                 }
@@ -68,31 +73,7 @@ struct RootView: View {
                     viewModel.engine = engine
                     viewModel.modelContext = modelContext
                 }
-                .onChange(of: engine.state) { oldState, newState in
-                    switch newState {
-                    case .idle:
-                        lastDownloadLogBucket = nil
-                        ConsoleLog.shared.info("Engine idle — no model loaded")
-                    case .loading:
-                        lastDownloadLogBucket = nil
-                        ConsoleLog.shared.info("Loading model…")
-                    case .downloading(let p, let speed):
-                        let percent = Int(p * 100)
-                        let bucket = min((percent / 25) * 25, 100)
-                        if bucket != lastDownloadLogBucket, [0, 25, 50, 75, 100].contains(bucket) {
-                            lastDownloadLogBucket = bucket
-                            ConsoleLog.shared.debug("Downloading: \(percent)% (\(speed))")
-                        }
-                    case .ready(let modelId):
-                        lastDownloadLogBucket = nil
-                        ConsoleLog.shared.info("✓ Model ready: \(modelId)")
-                    case .generating:
-                        lastDownloadLogBucket = nil
-                        ConsoleLog.shared.debug("Generating…")
-                    case .error(let msg):
-                        lastDownloadLogBucket = nil
-                        ConsoleLog.shared.error("Engine error: \(msg)")
-                    }
+                .onChange(of: engine.state) { _, _ in
                 }
                 .overlay {
                     if registry.isSyncing {
@@ -234,7 +215,6 @@ struct RootView: View {
             NavigationStack {
                 SettingsView(viewModel: viewModel, isTab: true)
                     .environmentObject(appearance)
-                    .environmentObject(server)
             }
             .tabItem {
                 Label("Settings", systemImage: selectedTab == .settings ? "gearshape.fill" : "gearshape")
@@ -243,7 +223,7 @@ struct RootView: View {
         }
         .tint(SwiftBuddyTheme.accent)
         // Navigate to Models tab when a model load is requested from chat
-        .onReceive(NotificationCenter.default.publisher(for: .showModelManagement)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .showModelPicker)) { _ in
             selectedTab = .models
         }
     }
@@ -361,7 +341,8 @@ struct RootView: View {
         } detail: {
             ChatView(
                 viewModel: viewModel,
-                showSettings: $showSettings
+                showSettings: $showSettings,
+                showModelPicker: $showModelPicker
             )
             .frame(minWidth: 400)
             .background(SwiftBuddyTheme.background)
@@ -425,7 +406,7 @@ struct RootView: View {
     private var engineStateView: some View {
         switch engine.state {
         case .idle:
-            Button("Load Model") { showModelManagement = true }
+            Button("Load Model") { showModelPicker = true }
                 .buttonStyle(.borderedProminent)
                 .tint(SwiftBuddyTheme.accent)
                 .controlSize(.small)

@@ -20,6 +20,7 @@ struct SettingsView: View {
     @State private var showRestartNotification = false
     @State private var endpointCopied = false
     @State private var showAppliedBadge = false
+    @State private var toastHideWork: DispatchWorkItem? = nil
     @State private var cliCopied = false
     @State private var serverSaveMessage = "Server settings saved"
     @State private var restartNotificationRequiresAction = false
@@ -226,7 +227,7 @@ struct SettingsView: View {
                                 .foregroundStyle(SwiftBuddyTheme.textSecondary)
                                 .font(.callout.monospacedDigit())
                             Stepper("", value: Binding(
-                                get: { Int(seed) },
+                                get: { Int(min(seed, UInt64(Int.max))) },
                                 set: { viewModel.config.seed = UInt64($0) }
                             ), in: 0...Int.max)
                             .labelsHidden()
@@ -242,7 +243,7 @@ struct SettingsView: View {
                                 .foregroundStyle(SwiftBuddyTheme.textTertiary)
                                 .font(.callout)
                             Button {
-                                viewModel.config.seed = UInt64.random(in: 0...UInt64.max)
+                                viewModel.config.seed = UInt64.random(in: 0...UInt64(Int.max))
                             } label: {
                                 Image(systemName: "lock.fill")
                                     .foregroundStyle(SwiftBuddyTheme.accent)
@@ -806,9 +807,14 @@ struct SettingsView: View {
 
     private func flashApplied() {
         withAnimation { showAppliedBadge = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+        // Cancel any pending hide before scheduling a new one to prevent
+        // stacked closures from causing flicker when sliders are dragged rapidly.
+        toastHideWork?.cancel()
+        let work = DispatchWorkItem {
             withAnimation { showAppliedBadge = false }
         }
+        toastHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
     }
 
     /// Build the equivalent `swift run SwiftLM` command from current settings.

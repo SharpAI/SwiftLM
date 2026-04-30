@@ -20,7 +20,7 @@ public struct GenerationConfig: Sendable, Codable {
     public var repetitionPenalty: Float
 
     /// Optional RNG seed for reproducible outputs.
-    /// When non-nil, `MLX.seed(seed)` is called before each generation.
+    /// When non-nil, `MLX.seed(seed)` is called before each generation using this `UInt64` value.
     public var seed: UInt64?
 
     public var enableThinking: Bool

@@ -157,7 +157,10 @@ final class ServerManager: ObservableObject {
                     case .ready(let id): modelId = id
                     default: modelId = "none"
                     }
-                    let body = "{\"object\":\"list\",\"data\":[{\"id\":\"\(modelId)\",\"object\":\"model\",\"owned_by\":\"swiftbuddy\"}]}"
+                    // Use swiftBuddyJSONString to safely escape the model ID —
+                    // model IDs with slashes (e.g. "mlx-community/Qwen3") are safe,
+                    // but quotes or control chars would break the JSON structure.
+                    let body = "{\"object\":\"list\",\"data\":[{\"id\":\(swiftBuddyJSONString(modelId)),\"object\":\"model\",\"owned_by\":\"swiftbuddy\"}]}"
                     return Response(status: .ok, headers: swiftBuddyJSONHeaders,
                                     body: .init(byteBuffer: ByteBuffer(string: body)))
                 }
@@ -182,9 +185,11 @@ final class ServerManager: ObservableObject {
                             let role    = m["role"]    as? String ?? "user"
                             let content = m["content"] as? String ?? ""
                             switch role {
-                            case "system":    chatMessages.append(.system(content))
-                            case "assistant": chatMessages.append(.assistant(content))
-                            default:          chatMessages.append(.user(content))
+                            case "system", "developer": chatMessages.append(.system(content))
+                            case "assistant":           chatMessages.append(.assistant(content))
+                            case "tool":                chatMessages.append(.tool(content))
+                            case "user":                chatMessages.append(.user(content))
+                            default:                    chatMessages.append(.user(content))
                             }
                         }
                     }
@@ -203,14 +208,18 @@ final class ServerManager: ObservableObject {
                     }
                     let reqId   = "chatcmpl-\(UUID().uuidString.prefix(8))"
                     let created = Int(Date().timeIntervalSince1970)
+                    // Escape model ID once — used in both streaming and non-streaming paths.
+                    // Slashes in HF model IDs (e.g. "mlx-community/Qwen3") are safe inside
+                    // JSON strings, but quotes/control chars in custom model names would break.
+                    let escapedModelId = swiftBuddyJSONString(modelId)
 
-                    // Helper: JSON-safe escape for a token string
+                    // Helper: JSON-safe escape for token text using JSONEncoder so ALL
+                    // control chars (U+0000–U+001F) are correctly escaped, not just \n/\r/\t.
                     func jsonEscape(_ s: String) -> String {
-                        s.replacingOccurrences(of: "\\", with: "\\\\")
-                         .replacingOccurrences(of: "\"", with: "\\\"")
-                         .replacingOccurrences(of: "\n", with: "\\n")
-                         .replacingOccurrences(of: "\r", with: "\\r")
-                         .replacingOccurrences(of: "\t", with: "\\t")
+                        guard let data = try? JSONEncoder().encode(s),
+                              let raw = String(data: data, encoding: .utf8) else { return "\"\"" }
+                        // JSONEncoder wraps in outer quotes — strip them for inline interpolation
+                        return String(raw.dropFirst().dropLast())
                     }
 
                     if streamRequested {
@@ -223,7 +232,7 @@ final class ServerManager: ObservableObject {
                         let sseStream = AsyncStream<ByteBuffer> { cont in
                             Task {
                                 for await token in await engine.generate(messages: chatMessages, config: reqConfig) {
-                                    let chunk = "{\"id\":\"\(reqId)\",\"object\":\"chat.completion.chunk\",\"created\":\(created),\"model\":\"\(modelId)\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\(jsonEscape(token.text))\"},\"finish_reason\":null}]}"
+                                    let chunk = "{\"id\":\"\(reqId)\",\"object\":\"chat.completion.chunk\",\"created\":\(created),\"model\":\(escapedModelId),\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\(jsonEscape(token.text))\"},\"finish_reason\":null}]}"
                                     cont.yield(ByteBuffer(string: "data: \(chunk)\n\n"))
                                 }
                                 cont.yield(ByteBuffer(string: "data: [DONE]\n\n"))
@@ -239,7 +248,7 @@ final class ServerManager: ObservableObject {
                         for await token in await engine.generate(messages: chatMessages, config: reqConfig) {
                             fullText += token.text
                         }
-                        let body = "{\"id\":\"\(reqId)\",\"object\":\"chat.completion\",\"created\":\(created),\"model\":\"\(modelId)\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\(jsonEscape(fullText))\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}"
+                        let body = "{\"id\":\"\(reqId)\",\"object\":\"chat.completion\",\"created\":\(created),\"model\":\(escapedModelId),\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\(jsonEscape(fullText))\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}"
                         return Response(status: .ok, headers: swiftBuddyJSONHeaders,
                                         body: .init(byteBuffer: ByteBuffer(string: body)))
                     }

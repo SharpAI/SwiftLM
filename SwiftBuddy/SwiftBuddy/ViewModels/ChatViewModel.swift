@@ -13,18 +13,41 @@ final class ChatViewModel: ObservableObject {
     @Published var thinkingText: String? = nil
     @Published var isGenerating: Bool = false
     @Published var config: GenerationConfig = .load() {
-        didSet { config.save() }
+        didSet { scheduleConfigSave() }
     }
     @Published var systemPrompt: String = {
         UserDefaults.standard.string(forKey: "swiftlm.systemPrompt") ?? ""
     }() {
-        didSet { UserDefaults.standard.set(systemPrompt, forKey: "swiftlm.systemPrompt") }
+        didSet { scheduleSystemPromptSave() }
     }
     public var currentWing: String? = nil
     weak var engine: InferenceEngine?
     var modelContext: ModelContext?
     private var generationTask: Task<Void, Never>?
     private var activeSession: ChatSession?
+
+    // MARK: — Debounced persistence
+    // Saves are debounced at 0.5 s so rapid slider drags or keystrokes
+    // don't saturate UserDefaults with synchronous writes and cause UI jank.
+    private var configSaveWork: DispatchWorkItem?
+    private var systemPromptSaveWork: DispatchWorkItem?
+
+    private func scheduleConfigSave() {
+        configSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.config.save() }
+        configSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    private func scheduleSystemPromptSave() {
+        systemPromptSaveWork?.cancel()
+        let snapshot = systemPrompt
+        let work = DispatchWorkItem {
+            UserDefaults.standard.set(snapshot, forKey: "swiftlm.systemPrompt")
+        }
+        systemPromptSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
 
     // MARK: — Send
 

@@ -594,6 +594,11 @@ extension InferenceEngine {
                     var outputText = ""
                     var tokenCount = 0
 
+                    // Set RNG seed for reproducible output when requested.
+                    if let seed = config.seed {
+                        MLX.seed(seed)
+                    }
+
                     // Pass enable_thinking to the Jinja chat template so the model
                     // actually generates <think> blocks when thinking mode is ON.
                     // Without this kwarg, Qwen3's template defaults to thinking=false

@@ -5,6 +5,14 @@ import Foundation
 ///
 /// Conforms to `Codable` so settings can be persisted across app launches
 /// via `save()` / `load()` using `UserDefaults`.
+///
+/// ### Notes on removed fields
+/// - `streamExperts` was removed: expert streaming is a **load-time** flag
+///   automatically derived from `ModelCatalog.isMoE` inside `InferenceEngine.load()`.
+///   Exposing it as a per-request toggle had no effect and misled users.
+/// - `turboKV` was removed: the PolarQuant+QJL path was never wired into
+///   `GenerateParameters` or the mlx-lm call chain. Use `kvBits: 4` or `kvBits: 8`
+///   for KV-cache quantisation instead.
 public struct GenerationConfig: Sendable, Codable {
     public var maxTokens: Int
     public var temperature: Float
@@ -12,16 +20,12 @@ public struct GenerationConfig: Sendable, Codable {
     public var topK: Int
     public var minP: Float
     public var repetitionPenalty: Float
+
+    /// Optional RNG seed for reproducible outputs.
+    /// When non-nil, `MLX.seed(UInt32(seed!))` is called before each generation.
     public var seed: UInt64?
+
     public var enableThinking: Bool
-
-    // ── SwiftLM Engine Parameters ──────────────────────────────────────
-    /// Enable TurboQuant KV-cache compression (3-bit PolarQuant+QJL).
-    /// Compresses KV history > 8192 tokens to ~3.5 bits/token.
-    public var turboKV: Bool
-
-    /// Enable SSD expert streaming for MoE models.
-    public var streamExperts: Bool
 
     /// Chunk size for prefill evaluation.
     /// Lower values prevent GPU timeout on large models.
@@ -42,8 +46,6 @@ public struct GenerationConfig: Sendable, Codable {
         repetitionPenalty: Float = 1.05,
         seed: UInt64? = nil,
         enableThinking: Bool = false,
-        turboKV: Bool = false,
-        streamExperts: Bool = false,
         prefillSize: Int = 512,
         kvBits: Int? = nil,
         kvGroupSize: Int = 64
@@ -56,8 +58,6 @@ public struct GenerationConfig: Sendable, Codable {
         self.repetitionPenalty = repetitionPenalty
         self.seed = seed
         self.enableThinking = enableThinking
-        self.turboKV = turboKV
-        self.streamExperts = streamExperts
         self.prefillSize = prefillSize
         self.kvBits = kvBits
         self.kvGroupSize = kvGroupSize

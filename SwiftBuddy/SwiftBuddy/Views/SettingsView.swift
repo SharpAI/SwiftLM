@@ -19,6 +19,8 @@ struct SettingsView: View {
     @State private var draftServerConfiguration = ServerStartupConfiguration.load()
     @State private var showRestartNotification = false
     @State private var endpointCopied = false
+    @State private var showAppliedBadge = false
+    @State private var cliCopied = false
     @State private var serverSaveMessage = "Server settings saved"
     @State private var restartNotificationRequiresAction = false
 
@@ -209,6 +211,48 @@ struct SettingsView: View {
                         tint: SwiftBuddyTheme.success,
                         hint: "Higher = less repeating, 1.0 = disabled"
                     )
+
+                    // Seed — optional reproducibility
+                    HStack {
+                        Label("Seed", systemImage: "number")
+                            .foregroundStyle(SwiftBuddyTheme.textPrimary)
+                            .font(.callout)
+                        Spacer()
+                        if let seed = viewModel.config.seed {
+                            Text("\(seed)")
+                                .foregroundStyle(SwiftBuddyTheme.textSecondary)
+                                .font(.callout.monospacedDigit())
+                            Stepper("", value: Binding(
+                                get: { Int(seed) },
+                                set: { viewModel.config.seed = UInt64($0) }
+                            ), in: 0...Int.max)
+                            .labelsHidden()
+                            Button {
+                                viewModel.config.seed = nil
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(SwiftBuddyTheme.textTertiary)
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Text("Random")
+                                .foregroundStyle(SwiftBuddyTheme.textTertiary)
+                                .font(.callout)
+                            Button {
+                                viewModel.config.seed = UInt64.random(in: 0...UInt64.max)
+                            } label: {
+                                Image(systemName: "lock.fill")
+                                    .foregroundStyle(SwiftBuddyTheme.accent)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                    if viewModel.config.seed != nil {
+                        Text("Fixed seed — same input will produce identical output")
+                            .font(.caption2)
+                            .foregroundStyle(SwiftBuddyTheme.textTertiary)
+                    }
                 }
 
                 parameterCard("Reasoning") {
@@ -256,6 +300,39 @@ struct SettingsView: View {
                 Spacer(minLength: 20)
             }
             .padding(.top, 8)
+        }
+        // Generation params are hot-applied per request — no restart needed.
+        // Flash a brief badge so the user knows the change was captured.
+        .onChange(of: viewModel.config.temperature)       { flashApplied() }
+        .onChange(of: viewModel.config.topP)              { flashApplied() }
+        .onChange(of: viewModel.config.topK)              { flashApplied() }
+        .onChange(of: viewModel.config.minP)              { flashApplied() }
+        .onChange(of: viewModel.config.maxTokens)         { flashApplied() }
+        .onChange(of: viewModel.config.repetitionPenalty) { flashApplied() }
+        .onChange(of: viewModel.config.enableThinking)    { flashApplied() }
+        .onChange(of: viewModel.config.kvBits)            { flashApplied() }
+        .onChange(of: viewModel.config.prefillSize)       { flashApplied() }
+        .onChange(of: viewModel.config.seed)              { flashApplied() }
+        .overlay(alignment: .top) {
+            if showAppliedBadge {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(SwiftBuddyTheme.success)
+                        .font(.caption)
+                    Text("Applied — takes effect on next message")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(SwiftBuddyTheme.textPrimary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial)
+                .background(SwiftBuddyTheme.success.opacity(0.12))
+                .clipShape(Capsule())
+                .overlay(Capsule().strokeBorder(SwiftBuddyTheme.success.opacity(0.3), lineWidth: 1))
+                .padding(.top, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .animation(.easeInOut(duration: 0.2), value: showAppliedBadge)
+            }
         }
     }
 
@@ -436,6 +513,43 @@ struct SettingsView: View {
                     .tint(SwiftBuddyTheme.accent)
                 }
 
+                parameterCard("Advanced Engine") {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "bolt.circle.fill")
+                            .foregroundStyle(SwiftBuddyTheme.accentSecondary)
+                            .font(.callout)
+                            .padding(.top, 2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("SSD Streaming — automatic for MoE models")
+                                .font(.callout.weight(.medium))
+                                .foregroundStyle(SwiftBuddyTheme.textPrimary)
+                            Text("Expert weight streaming is enabled automatically when you load a Mixture-of-Experts model (e.g. Qwen 3.5 35B MoE). No manual toggle is needed.")
+                                .font(.caption2)
+                                .foregroundStyle(SwiftBuddyTheme.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.vertical, 2)
+
+                    Divider().background(SwiftBuddyTheme.divider)
+
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "memorychip")
+                            .foregroundStyle(SwiftBuddyTheme.warning)
+                            .font(.callout)
+                            .padding(.top, 2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("KV Cache Quantisation")
+                                .font(.callout.weight(.medium))
+                                .foregroundStyle(SwiftBuddyTheme.textPrimary)
+                            Text("Set KV Bits to 4 or 8 in the KV Cache card below to compress the attention cache. Reduces VRAM at the cost of slight quality.")
+                                .font(.caption2)
+                                .foregroundStyle(SwiftBuddyTheme.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
                 #if os(iOS)
                 parameterCard("iOS Performance") {
                     toggleRow(
@@ -458,6 +572,34 @@ struct SettingsView: View {
                 }
                 #endif
 
+                // ── CLI Equivalent ──────────────────────────────────────────
+                parameterCard("CLI Equivalent") {
+                    Text("Run standalone server with these settings:")
+                        .font(.caption2)
+                        .foregroundStyle(SwiftBuddyTheme.textTertiary)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(cliCommand)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(SwiftBuddyTheme.textSecondary)
+                            .textSelection(.enabled)
+                            .padding(.vertical, 6)
+                    }
+
+                    Button {
+                        copyCLI()
+                    } label: {
+                        Label(
+                            cliCopied ? "Copied!" : "Copy Command",
+                            systemImage: cliCopied ? "checkmark" : "doc.on.doc"
+                        )
+                        .font(.caption.weight(.medium))
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(cliCopied ? SwiftBuddyTheme.success : SwiftBuddyTheme.accent)
+                    .animation(.easeInOut(duration: 0.2), value: cliCopied)
+                }
                 Spacer(minLength: 20)
             }
             .padding(.top, 8)
@@ -641,6 +783,83 @@ struct SettingsView: View {
                 .strokeBorder(SwiftBuddyTheme.warning.opacity(0.45), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+    }
+
+    private func flashApplied() {
+        withAnimation { showAppliedBadge = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            withAnimation { showAppliedBadge = false }
+        }
+    }
+
+    /// Build the equivalent `swift run SwiftLM` command from current settings.
+    private var cliCommand: String {
+        let cfg = viewModel.config
+        let srv = server
+        var parts: [String] = []
+
+        // Model (use loaded ID if available)
+        switch engine.state {
+        case .ready(let id):
+            parts.append("--model \(id)")
+        default:
+            parts.append("--model <model-id>")
+        }
+
+        parts.append("--host \(srv.host)")
+        parts.append("--port \(srv.port)")
+        parts.append("--max-tokens \(cfg.maxTokens)")
+        parts.append("--temp \(String(format: "%.2f", cfg.temperature))")
+
+        if cfg.topP < 1.0 {
+            parts.append("--top-p \(String(format: "%.2f", cfg.topP))")
+        }
+        if cfg.topK != 50 {
+            parts.append("--top-k \(cfg.topK)")
+        }
+        if cfg.minP > 0 {
+            parts.append("--min-p \(String(format: "%.2f", cfg.minP))")
+        }
+        if cfg.repetitionPenalty != 1.05 {
+            parts.append("--repeat-penalty \(String(format: "%.2f", cfg.repetitionPenalty))")
+        }
+        if cfg.prefillSize != 512 {
+            parts.append("--prefill-size \(cfg.prefillSize)")
+        }
+        if let kvBits = cfg.kvBits {
+            parts.append("--kv-bits \(kvBits)")
+            if cfg.kvGroupSize != 64 {
+                parts.append("--kv-group-size \(cfg.kvGroupSize)")
+            }
+        }
+        if cfg.enableThinking {
+            parts.append("--thinking")
+        }
+        if let seed = cfg.seed {
+            parts.append("--seed \(seed)")
+        }
+        if srv.parallelSlots > 1 {
+            parts.append("--parallel \(srv.parallelSlots)")
+        }
+        if !srv.startupConfiguration.apiKey.isEmpty {
+            parts.append("--api-key <redacted>")
+        }
+
+        return "swift run SwiftLM " + parts.joined(separator: " \\
+  ")
+    }
+
+    private func copyCLI() {
+        #if os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(cliCommand, forType: .string)
+        #else
+        UIPasteboard.general.string = cliCommand
+        #endif
+        withAnimation { cliCopied = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            withAnimation { cliCopied = false }
+        }
     }
 
     private func copyEndpoint(_ url: String) {

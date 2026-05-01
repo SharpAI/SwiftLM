@@ -72,7 +72,7 @@ private struct TransformersTokenizerBridge: MLXLMCommon.Tokenizer, Sendable {
 public enum ModelState: Equatable, Sendable {
     case idle
     case downloading(progress: Double, speed: String)
-    case loading
+    case loading(progress: Double, stage: String)
     case ready(modelId: String)
     case generating
     case error(String)
@@ -319,7 +319,7 @@ public final class InferenceEngine: ObservableObject {
     }
 
     private func loadVerifiedModel(modelId: String) async {
-        state = .loading
+        setLoadingState(progress: 0.05, stage: "Preparing model configuration")
         currentModelId = modelId
 
         do {
@@ -354,13 +354,18 @@ public final class InferenceEngine: ObservableObject {
                 print("[InferenceEngine] SSD expert streaming: disabled")
             }
 
+            setLoadingState(progress: 0.15, stage: "Inspecting model architecture")
             let downloader = HubDownloader(hub: hub)
             let architecture = try await ModelArchitectureProbe.inspect(
                 configuration: config,
                 downloader: downloader
             )
 
-            let speedTracker = DownloadSpeedTracker()
+            let loadingStage = architecture.supportsVision
+                ? "Loading multimodal model"
+                : "Loading language model"
+
+            setLoadingState(progress: 0.22, stage: loadingStage)
 
             if architecture.supportsVision {
                 container = try await VLMModelFactory.shared.loadContainer(
@@ -368,22 +373,10 @@ public final class InferenceEngine: ObservableObject {
                     using: TransformersTokenizerLoader(),
                     configuration: config
                 ) { [weak self] progress in
-                    speedTracker.record(totalBytes: progress.completedUnitCount)
-                    let smoothedSpeed = speedTracker.speedBytesPerSec
-
                     Task { @MainActor in
                         guard let self else { return }
                         let pct = progress.fractionCompleted
-                        let speedStr = smoothedSpeed
-                            .map { String(format: "%.1f MB/s", $0 / 1_000_000) } ?? ""
-                        self.state = .downloading(progress: pct, speed: speedStr)
-
-                        self.downloadManager.updateProgress(ModelDownloadProgress(
-                            modelId: modelId,
-                            fractionCompleted: pct,
-                            currentFile: "",
-                            speedMBps: smoothedSpeed.map { $0 / 1_000_000 }
-                        ))
+                        self.setLoadingState(progress: 0.22 + (pct * 0.68), stage: loadingStage)
                     }
                 }
             } else {
@@ -392,22 +385,10 @@ public final class InferenceEngine: ObservableObject {
                     using: TransformersTokenizerLoader(),
                     configuration: config
                 ) { [weak self] progress in
-                    speedTracker.record(totalBytes: progress.completedUnitCount)
-                    let smoothedSpeed = speedTracker.speedBytesPerSec
-
                     Task { @MainActor in
                         guard let self else { return }
                         let pct = progress.fractionCompleted
-                        let speedStr = smoothedSpeed
-                            .map { String(format: "%.1f MB/s", $0 / 1_000_000) } ?? ""
-                        self.state = .downloading(progress: pct, speed: speedStr)
-
-                        self.downloadManager.updateProgress(ModelDownloadProgress(
-                            modelId: modelId,
-                            fractionCompleted: pct,
-                            currentFile: "",
-                            speedMBps: smoothedSpeed.map { $0 / 1_000_000 }
-                        ))
+                        self.setLoadingState(progress: 0.22 + (pct * 0.68), stage: loadingStage)
                     }
                 }
             }
@@ -417,11 +398,13 @@ public final class InferenceEngine: ObservableObject {
             downloadManager.refresh()
 
             // Verify integrity to catch incomplete downloads before marking as ready
+            setLoadingState(progress: 0.94, stage: "Verifying model files")
             guard ModelStorage.verifyModelIntegrity(for: modelId) else {
                 throw NSError(domain: "InferenceEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Model safetensors files are incomplete. Please delete and re-download."])
             }
 
             // Read the model's actual max context length from config.json
+            setLoadingState(progress: 0.98, stage: "Reading model limits")
             if let ctxLen = ModelStorage.readMaxContextLength(for: modelId) {
                 self.maxContextWindow = ctxLen
                 print("[InferenceEngine] Model context window: \(ctxLen) tokens")
@@ -469,6 +452,10 @@ public final class InferenceEngine: ObservableObject {
         activeContextTokens = 0
         ExpertStreamingConfig.shared.deactivate()
         MLX.Memory.cacheLimit = 0
+    }
+
+    private func setLoadingState(progress: Double, stage: String) {
+        state = .loading(progress: min(max(progress, 0), 1), stage: stage)
     }
 
     private func markModelCorrupted(modelId: String?, message: String) {
@@ -622,7 +609,7 @@ extension InferenceEngine {
                     // Use the real token count from the prepared LMInput rather than
                     // a character-length heuristic (which was consistently off by 2–3×
                     // for CJK and code content).
-                    let baseTokens = lmInput.text.tokens.shape[0]
+                    let baseTokens = lmInput.text.tokens.size
                     self.activeContextTokens = baseTokens
                     
                     // maxContextWindow is already set during loadModel() from config.json

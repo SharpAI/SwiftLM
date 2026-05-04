@@ -15,7 +15,7 @@ final class ContextWindowCalculationTests: XCTestCase {
         // Mock a scenario where userInput prepares a chat template with large history.
         // We will directly instantiate LMInput and assert on its size.
         
-        let mockTokens = MLXArray(stride: 0, to: 512, by: 1)
+        let mockTokens = MLXArray(Array(0..<512))
         // If tokenizer batches it, shape could be [1, 512].
         let reshapedTokens = mockTokens.reshaped([1, 512])
         

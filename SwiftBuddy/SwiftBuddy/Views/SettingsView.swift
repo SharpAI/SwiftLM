@@ -49,16 +49,43 @@ struct SettingsView: View {
     // Tracks the stream-experts value that was in effect when the current model was loaded.
     // A mismatch with `effectiveStreamExpertsSetting` means a reload is required.
     @State private var appliedStreamExperts: Bool? = nil
+    @State private var appliedMTP: Bool? = nil
 
-    private var needsModelReloadForStreamingChange: Bool {
-        guard let applied = appliedStreamExperts else { return false }
-        return effectiveStreamExpertsSetting != applied
+    private var needsModelReloadForLoadTimeChange: Bool {
+        if let applied = appliedStreamExperts, effectiveStreamExpertsSetting != applied {
+            return true
+        }
+        if let applied = appliedMTP, viewModel.config.enableMTP != applied {
+            return true
+        }
+        return false
+    }
+
+    private var mtpBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.config.enableMTP },
+            set: { newValue in
+                viewModel.config.enableMTP = newValue
+                viewModel.config.save()
+                if currentModelId != nil {
+                    reloadCurrentModel()
+                }
+            }
+        )
     }
 
     private var ssdStreamingBinding: Binding<Bool> {
         Binding(
             get: { effectiveStreamExpertsSetting },
-            set: { viewModel.config.streamExperts = $0 }
+            set: { newValue in
+                viewModel.config.streamExperts = newValue
+                // Auto-reload: save config and immediately restart the model so
+                // the load-time SSD streaming flag takes effect without a manual tap.
+                viewModel.config.save()
+                if currentModelId != nil {
+                    reloadCurrentModel()
+                }
+            }
         )
     }
 
@@ -135,11 +162,13 @@ struct SettingsView: View {
                 // prompt doesn't fire spuriously on first open.
                 if case .ready = engine.state {
                     appliedStreamExperts = effectiveStreamExpertsSetting
+                    appliedMTP = viewModel.config.enableMTP
                 }
             }
             .onChange(of: engine.state) { _, newState in
                 if case .ready = newState {
                     appliedStreamExperts = effectiveStreamExpertsSetting
+                    appliedMTP = viewModel.config.enableMTP
                 }
             }
             #if os(macOS)
@@ -317,10 +346,16 @@ struct SettingsView: View {
                         label: "SSD Streaming", icon: "internaldrive",
                         isOn: ssdStreamingBinding,
                         tint: SwiftBuddyTheme.warning,
-                        hint: "Stream MoE expert weights from NVMe (requires model reload)"
+                        hint: "Stream MoE expert weights from NVMe (auto-reloads model)"
                     )
-                    if needsModelReloadForStreamingChange {
-                        modelReloadPrompt
+                    toggleRow(
+                        label: "MTP Speculative Decoding", icon: "bolt.horizontal.fill",
+                        isOn: mtpBinding,
+                        tint: SwiftBuddyTheme.accent,
+                        hint: "2x+ throughput using Multi-Token Prediction (auto-reloads model)"
+                    )
+                    if needsModelReloadForLoadTimeChange {
+                        engineReloadingIndicator
                     }
                     toggleRow(
                         label: "TurboQuant KV", icon: "bolt.badge.clock",
@@ -379,6 +414,7 @@ struct SettingsView: View {
         .onChange(of: viewModel.config.kvBits)            { flashApplied() }
         .onChange(of: viewModel.config.prefillSize)       { flashApplied() }
         .onChange(of: viewModel.config.seed)              { flashApplied() }
+        .onChange(of: viewModel.config.numMTPTokens)      { flashApplied() }
         .overlay(alignment: .top) {
             if showAppliedBadge {
                 HStack(spacing: 6) {
@@ -574,16 +610,34 @@ struct SettingsView: View {
 
                     Divider().background(SwiftBuddyTheme.divider)
 
-                    // ── SSD Expert Streaming (load-time — shows reload prompt) ────
+                    // ── SSD Expert Streaming (load-time — auto-reloads model) ────
                     VStack(alignment: .leading, spacing: 6) {
                         toggleRow(
                             label: "SSD Expert Streaming", icon: "externaldrive.fill",
                             isOn: ssdStreamingBinding,
                             tint: SwiftBuddyTheme.accentSecondary,
-                            hint: "mmap expert weights from NVMe — only active expert pages stay in RAM. Auto-enabled for MoE catalog models."
+                            hint: "mmap expert weights from NVMe — only active expert pages stay in RAM. Auto-enabled for MoE catalog models. Toggling auto-reloads the model."
                         )
-                        if needsModelReloadForStreamingChange {
-                            modelReloadPrompt
+                        toggleRow(
+                            label: "MTP Speculative Decoding", icon: "bolt.horizontal.fill",
+                            isOn: mtpBinding,
+                            tint: SwiftBuddyTheme.accent,
+                            hint: "2x+ inference throughput using Multi-Token Prediction. Requires MTP checkpoint. Toggling auto-reloads the model."
+                        )
+                        if viewModel.config.enableMTP {
+                            sliderRow(
+                                label: "Draft Tokens", icon: "arrow.right.to.line",
+                                value: Binding(
+                                    get: { Double(viewModel.config.numMTPTokens) },
+                                    set: { viewModel.config.numMTPTokens = Int($0) }
+                                ),
+                                range: 1...5, step: 1, format: "%.0f",
+                                tint: SwiftBuddyTheme.accent,
+                                hint: "Number of tokens drafted per speculation round"
+                            )
+                        }
+                        if needsModelReloadForLoadTimeChange {
+                            engineReloadingIndicator
                         }
                     }
                 }
@@ -946,24 +1000,31 @@ struct SettingsView: View {
         }
     }
 
+    /// Shown while the model is reloading after a load-time setting toggle.
+    /// No manual button — the reload was already kicked off automatically.
     @ViewBuilder
-    private var modelReloadPrompt: some View {
+    private var engineReloadingIndicator: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Image(systemName: "arrow.clockwise.circle.fill")
-                    .foregroundStyle(SwiftBuddyTheme.warning)
-                    .font(.caption)
-                Text("Reload model to apply this change")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(SwiftBuddyTheme.warning)
-                Spacer()
-                Button("Reload") {
-                    reloadCurrentModel()
+                switch engine.state {
+                case .loading, .downloading:
+                    ProgressView()
+                        .controlSize(.mini)
+                default:
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                        .foregroundStyle(SwiftBuddyTheme.warning)
+                        .font(.caption)
                 }
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(SwiftBuddyTheme.accent)
-                .buttonStyle(.plain)
-                .disabled(currentModelId == nil)
+                Text({
+                    switch engine.state {
+                    case .loading(_, let stage): return stage
+                    case .downloading(_, let speed): return "Downloading · \(speed)"
+                    default: return "Reloading model…"
+                    }
+                }())
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(SwiftBuddyTheme.warning)
+                Spacer()
             }
 
             switch engine.state {

@@ -105,6 +105,20 @@ public struct GenerationToken: Sendable {
     }
 }
 
+// MARK: — Inference Metrics
+
+/// Live performance counters updated at the end of each generation pass.
+public struct InferenceMetrics: Sendable {
+    /// Time from first-token request to first decoded token (seconds).
+    public var ttft: Double
+    /// Prompt / prefill throughput (tokens per second).
+    public var prefillToksPerSec: Double
+    /// Decode throughput — tokens generated per second after the first token.
+    public var decodeToksPerSec: Double
+
+    public static let zero = InferenceMetrics(ttft: 0, prefillToksPerSec: 0, decodeToksPerSec: 0)
+}
+
 // MARK: — InferenceEngine
 
 @MainActor
@@ -113,6 +127,8 @@ public final class InferenceEngine: ObservableObject {
     @Published public private(set) var thermalLevel: ThermalLevel = .nominal
     @Published public private(set) var activeContextTokens: Int = 0
     @Published public private(set) var maxContextWindow: Int = 0
+    /// Performance counters from the most recent completed generation.
+    @Published public private(set) var lastMetrics: InferenceMetrics = .zero
 
     /// Set when a corrupted/truncated model is detected during inference.
     /// The UI should observe this and offer to delete & re-download.
@@ -587,6 +603,10 @@ extension InferenceEngine {
                     var outputText = ""
                     var tokenCount = 0
 
+                    // ── Metrics timing ──────────────────────────────────────
+                    let generationStart = Date()
+                    var firstTokenDate: Date? = nil
+
                     // Set RNG seed for reproducible output when requested.
                     if let seed = config.seed {
                         MLX.seed(seed)
@@ -627,21 +647,39 @@ extension InferenceEngine {
                     }
 
                     let stream: AsyncStream<Generation> = try await container.perform { ctx in
-                        try MLXLMCommon.generate(
-                            input: lmInput,
-                            cache: cache,
-                            parameters: params,
-                            context: ctx
-                        )
+                        // MTP speculative decoding path: use MTPTokenIterator when
+                        //   1. The config requests MTP (enableMTP=true)
+                        //   2. The loaded model conforms to MTPLanguageModel
+                        if config.enableMTP, ctx.model is (any MTPLanguageModel) {
+                            return try MLXLMCommon.generateMTP(
+                                input: lmInput,
+                                cache: cache,
+                                parameters: params,
+                                context: ctx,
+                                numMTPTokens: config.numMTPTokens
+                            )
+                        } else {
+                            return try MLXLMCommon.generate(
+                                input: lmInput,
+                                cache: cache,
+                                parameters: params,
+                                context: ctx
+                            )
+                        }
                     }
 
                     for await generation in stream {
                         guard !Task.isCancelled else { break }
 
                         if case .chunk(let text, tokenId: _) = generation {
+                            // Record time-to-first-token on the very first chunk
+                            if firstTokenDate == nil {
+                                firstTokenDate = Date()
+                            }
+
                             outputText += text
                             tokenCount += 1
-                            
+
                             // Update the UI token counter periodically to save CPU
                             if tokenCount % 10 == 0 {
                                 self.activeContextTokens = baseTokens + tokenCount
@@ -669,6 +707,24 @@ extension InferenceEngine {
                             continuation.yield(GenerationToken(text: text, isThinking: thinkingActive))
                         }
                     }
+
+                    // ── Publish metrics for the completed turn ───────────────
+                    let totalElapsed = Date().timeIntervalSince(generationStart)
+                    let ttft = firstTokenDate.map { $0.timeIntervalSince(generationStart) } ?? 0
+                    // Prefill throughput: prompt tokens / time-to-first-token
+                    let prefillTps = (ttft > 0 && baseTokens > 0)
+                        ? Double(baseTokens) / ttft
+                        : 0
+                    // Decode throughput: generated tokens / time spent decoding
+                    let decodeElapsed = totalElapsed - ttft
+                    let decodeTps = (decodeElapsed > 0 && tokenCount > 1)
+                        ? Double(tokenCount - 1) / decodeElapsed
+                        : 0
+                    self.lastMetrics = InferenceMetrics(
+                        ttft: ttft,
+                        prefillToksPerSec: prefillTps,
+                        decodeToksPerSec: decodeTps
+                    )
                 } catch let ssdError as SSDStreamingError {
                     // Corrupted/truncated safetensors — surface a clear, actionable error
                     let msg = "Model weights are corrupted or incomplete. Please re-download the model."

@@ -50,6 +50,20 @@ public struct GenerationConfig: Sendable, Codable {
     /// force-disable streaming even on MoE models.
     public var streamExperts: Bool
 
+    /// Enable MTP (Multi-Token Prediction) speculative decoding.
+    /// When true, the inference engine will use the model's internal MTP heads
+    /// to draft `numMTPTokens` candidate tokens per step, then verify them in
+    /// a single batched forward pass — targeting 2x+ throughput improvement.
+    /// Requires a checkpoint that retains `mtp.*` weights (set SWIFTLM_MTP_ENABLE=1
+    /// at model-load time). No-ops gracefully if the model does not conform to
+    /// `MTPLanguageModel`.
+    /// ⚠️ LOAD-TIME flag: changes take effect on the next model load.
+    public var enableMTP: Bool
+
+    /// Number of tokens the MTP heads draft per speculation round (default 1).
+    /// Higher values increase potential speedup but also increase rejection rate.
+    public var numMTPTokens: Int
+
     public init(
         maxTokens: Int = 2048,
         temperature: Float = 0.6,
@@ -63,7 +77,9 @@ public struct GenerationConfig: Sendable, Codable {
         kvBits: Int? = nil,
         kvGroupSize: Int = 64,
         turboKV: Bool = false,
-        streamExperts: Bool = false
+        streamExperts: Bool = false,
+        enableMTP: Bool = false,
+        numMTPTokens: Int = 1
     ) {
         self.maxTokens = maxTokens
         self.temperature = temperature
@@ -78,6 +94,8 @@ public struct GenerationConfig: Sendable, Codable {
         self.kvGroupSize = kvGroupSize
         self.turboKV = turboKV
         self.streamExperts = streamExperts
+        self.enableMTP = enableMTP
+        self.numMTPTokens = numMTPTokens
     }
 
     public static let `default` = GenerationConfig()

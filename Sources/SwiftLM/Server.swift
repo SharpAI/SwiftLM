@@ -280,6 +280,12 @@ struct MLXServer: AsyncParsableCommand {
     @Option(name: .long, help: "DFlash block size (number of tokens per draft block). Default: use draft model's configured block_size.")
     var dflashBlockSize: Int?
 
+    @Flag(name: .long, help: "Enable Multi-Token Prediction (MTP) Speculative Decoding.")
+    var mtp: Bool = false
+
+    @Option(name: .long, help: "Number of MTP tokens to generate per speculation round (default: 3)")
+    var numMtpTokens: Int = 3
+
     mutating func run() async throws {
         // Raise the open-file limit: large sharded models (e.g. Kimi K2.5, 182 safetensor
         // shards) + draft model + metallib + dylibs can exhaust the default macOS FD limit of 256.
@@ -295,8 +301,12 @@ struct MLXServer: AsyncParsableCommand {
         // This env var must be set before MLX's Metal backend initializes.
         // Value 50 splits large computation graphs into ~1-layer chunks so macOS
         // can page in weights incrementally without exceeding the watchdog timeout.
-        if self.draftModel != nil || self.streamExperts {
+        if self.draftModel != nil || self.streamExperts || self.mtp {
             setenv("MLX_MAX_OPS_PER_BUFFER", "50", 1)
+        }
+
+        if self.mtp {
+            setenv("SWIFTLM_MTP_ENABLE", "1", 1)
         }
 
         // Register SwiftLM-owned DFlash model types before any model loading.
@@ -766,7 +776,9 @@ struct MLXServer: AsyncParsableCommand {
             thinking: self.thinking,
             isVision: isVision,
             prefillSize: self.prefillSize,
-            turboKV: self.turboKV
+            turboKV: self.turboKV,
+            mtp: self.mtp,
+            numMtpTokens: self.numMtpTokens
         )
 
         let parallelSlots = self.parallel
@@ -797,7 +809,8 @@ struct MLXServer: AsyncParsableCommand {
         let thinkingStr = config.thinking ? "enabled" : "disabled"
         let ssdStr = self.streamExperts ? "enabled" : "disabled"
         let turboKVStr = config.turboKV ? "enabled" : "disabled"
-        print("[SwiftLM] Config: ctx_size=\(ctxSizeStr), temp=\(config.temp), top_p=\(config.topP), top_k=\(topKStr), min_p=\(minPStr), repeat_penalty=\(penaltyStr), parallel=\(parallelSlots), cors=\(corsStr), mem_limit=\(memLimitStr), auth=\(authStr), thinking=\(thinkingStr), ssd_stream=\(ssdStr), turbo_kv=\(turboKVStr)")
+        let mtpStr = config.mtp ? "enabled (\(config.numMtpTokens) tokens/round)" : "disabled"
+        print("[SwiftLM] Config: ctx_size=\(ctxSizeStr), temp=\(config.temp), top_p=\(config.topP), top_k=\(topKStr), min_p=\(minPStr), repeat_penalty=\(penaltyStr), parallel=\(parallelSlots), cors=\(corsStr), mem_limit=\(memLimitStr), auth=\(authStr), thinking=\(thinkingStr), ssd_stream=\(ssdStr), turbo_kv=\(turboKVStr), mtp=\(mtpStr)")
 
         // ── Build Hummingbird router ──
         let router = Router()
@@ -1044,6 +1057,8 @@ struct ServerConfig: Sendable {
     let prefillSize: Int
     /// When true, each KVCacheSimple layer compresses history > 8192 tokens to 3-bit PolarQuant.
     let turboKV: Bool
+    let mtp: Bool
+    let numMtpTokens: Int
 }
 
 // ── SSD Memory Budget ────────────────────────────────────────────────────────
@@ -1584,14 +1599,26 @@ func handleChatCompletion(
             }
             let remainingTokens = lmInput.text.tokens[startIndex...]
             let trimmedInput = LMInput(tokens: remainingTokens)
-            stream = try MLXLMCommon.generate(
-                input: trimmedInput, cache: cache, parameters: params, context: context
-            )
+            if config.mtp, context.model is any MTPLanguageModel {
+                stream = try MLXLMCommon.generateMTP(
+                    input: trimmedInput, cache: cache, parameters: params, context: context, numMTPTokens: config.numMtpTokens
+                )
+            } else {
+                stream = try MLXLMCommon.generate(
+                    input: trimmedInput, cache: cache, parameters: params, context: context
+                )
+            }
         } else {
             // Cache miss: process the full prompt.
-            stream = try MLXLMCommon.generate(
-                input: lmInput, cache: cache, parameters: params, context: context
-            )
+            if config.mtp, context.model is any MTPLanguageModel {
+                stream = try MLXLMCommon.generateMTP(
+                    input: lmInput, cache: cache, parameters: params, context: context, numMTPTokens: config.numMtpTokens
+                )
+            } else {
+                stream = try MLXLMCommon.generate(
+                    input: lmInput, cache: cache, parameters: params, context: context
+                )
+            }
         }
         
         // Return a closure that will save the cache state synchronously AFTER

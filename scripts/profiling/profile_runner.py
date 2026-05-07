@@ -11,11 +11,12 @@ import sys
 import os
 
 CONFIGS = [
-    {"name": "Dense/Vanilla", "flags": []},
-    {"name": "SSD Stream", "flags": ["--stream-experts"]},
-    {"name": "TurboQuant", "flags": ["--turbo-kv"]},
-    {"name": "SSD + TurboQuant", "flags": ["--stream-experts", "--turbo-kv"]},
-    {"name": "SSD + 16-Worker Prefetch", "flags": ["--stream-experts", "--ssd-prefetch"]}
+    # Baseline: no extras — establishes raw TPS floor on FP8 dequanted BF16
+    {"name": "Baseline",         "flags": ["--stream-experts"]},
+    # MTP Speculative — measures speculative gain
+    {"name": "MTP Speculative",  "flags": ["--mtp", "--stream-experts"]},
+    # MTP + TurboKV — target production config
+    {"name": "MTP + TurboQuant", "flags": ["--mtp", "--turbo-kv", "--stream-experts"]},
 ]
 
 SWIFTLM_PATH = ".build/arm64-apple-macosx/release/SwiftLM"
@@ -73,7 +74,7 @@ def get_hf_cache_bytes(model_id):
 
 SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-def poll_health(server_proc, port=5422, timeout=30, model_id="", model_size_gb=0, check_overcommit_log=None, baseline_alloc=0, requires_dense_memory=False):
+def poll_health(server_proc, port=5422, timeout=300, model_id="", model_size_gb=0, check_overcommit_log=None, baseline_alloc=0, requires_dense_memory=False):
     start = time.time()
     url = f"http://127.0.0.1:{port}/health"
     total_bytes = int(model_size_gb * 1024**3) if model_size_gb > 0 else 0
@@ -366,14 +367,15 @@ def main():
                 results.append({
                     "config": config["name"],
                     "context": ctx_size,
-                    "ttft": f"{ttft:.2f}",
+                    "ttft": f"{ttft:.2f}" if ttft is not None else "N/A",
                     "tps": f"{tps:.2f}",
                     "static_mem": static_mem,
                     "os_ram": os_ram,
                     "gpu_alloc": f"{gpu_alloc:.1f}",
                     "gpu_in_use_peak": f"{peak_in_use:.1f}",
                 })
-                print(f"  TTFT={ttft:.2f}s  TPS={tps:.2f}  OS_RAM={os_ram}GB  GPU_Alloc={gpu_alloc:.1f}GB  GPU_InUse(peak)={peak_in_use:.1f}GB")
+                ttft_str = f"{ttft:.2f}" if ttft is not None else "N/A"
+                print(f"  TTFT={ttft_str}s  TPS={tps:.2f}  OS_RAM={os_ram}GB  GPU_Alloc={gpu_alloc:.1f}GB  GPU_InUse(peak)={peak_in_use:.1f}GB")
             else:
                 print(f"  FAILED / OOM")
                 

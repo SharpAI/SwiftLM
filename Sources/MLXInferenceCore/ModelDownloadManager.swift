@@ -58,6 +58,9 @@ public final class ModelDownloadManager: ObservableObject {
     @Published public private(set) var networkStatus: NetworkStatus = .unknown
 
     private var downloadedModelIDs: Set<String> = []
+    /// Paths already reported by the unrecognized-directory diagnostic (issue #110),
+    /// so refreshing the models view does not reprint the same lines.
+    private var loggedUnrecognizedPaths: Set<String> = []
 
     // MARK: Persistence
     private let lastModelKey = "swiftlm.lastLoadedModelId"
@@ -142,6 +145,18 @@ public final class ModelDownloadManager: ObservableObject {
                 // Exclude models that are already actively downloading
                 !activeDownloads.keys.contains(incomplete.id)
             }
+
+        // Issue #110: a folder that looks like a model but fails verification used to
+        // vanish silently, indistinguishable from one the app never looked at. Log the
+        // reason once per distinct set so repeated refreshes stay quiet.
+        let unrecognized = ModelStorage.diagnoseUnrecognizedDirectories(knownModels: scanned)
+        let paths = Set(unrecognized.map(\.directory.path))
+        if paths != loggedUnrecognizedPaths {
+            loggedUnrecognizedPaths = paths
+            for finding in unrecognized {
+                print("[ModelStorage] Not listed: \(finding.directory.path) — \(finding.reason)")
+            }
+        }
     }
 
     public func isDownloaded(_ modelId: String) -> Bool {

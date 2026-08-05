@@ -200,6 +200,10 @@ struct ModelsView: View {
                 }
             }
         }
+        // Issue #110: refresh() previously ran only at init, after a download, and
+        // after a delete — so a model folder copied into the cache while the app was
+        // open stayed invisible until the next launch.
+        .onAppear { dm.refresh() }
         .sheet(isPresented: $showHFSearch) {
             HFSearchSheet(onSelect: handleSelect)
                 .environmentObject(engine)

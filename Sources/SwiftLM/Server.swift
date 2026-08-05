@@ -1832,7 +1832,8 @@ func handleChatStreaming(
         for await generation in stream {
             if stopped { break }
             switch generation {
-            case .chunk(let text, _):
+            case .chunk:
+                guard let text = generation.chunk else { continue }
                 completionTokenCount += 1
                 fullText += text
                 // GPU yield: prevent Metal from starving macOS WindowServer
@@ -2018,7 +2019,8 @@ func handleChatNonStreaming(
     var firstToken = true
     for await generation in stream {
         switch generation {
-        case .chunk(let text, _):
+        case .chunk:
+            guard let text = generation.chunk else { continue }
             fullText += text
             completionTokenCount += 1
             // GPU yield: prevent Metal from starving macOS WindowServer

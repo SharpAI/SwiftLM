@@ -245,7 +245,7 @@ enum Calibrator {
                     context: context
                 ) {
                     switch result {
-                    case .chunk(_, tokenId: _):
+                    case .chunk:
                         if firstTokenTime == nil {
                             firstTokenTime = Date()
                         }

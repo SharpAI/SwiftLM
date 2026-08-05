@@ -204,6 +204,8 @@ enum ModelProfiler {
         let headDim: Int?
         let intermediateSize: Int?
         let vocabSize: Int?
+        let numExperts: Int?
+        let numExpertsPerTok: Int?
 
         enum CodingKeys: String, CodingKey {
             case numHiddenLayers = "num_hidden_layers"
@@ -213,6 +215,8 @@ enum ModelProfiler {
             case headDim = "head_dim"
             case intermediateSize = "intermediate_size"
             case vocabSize = "vocab_size"
+            case numExperts = "num_experts"
+            case numExpertsPerTok = "num_experts_per_tok"
         }
     }
 
@@ -252,9 +256,9 @@ enum ModelProfiler {
         let quantBits = config.quantizationConfig?.bits ?? detectQuantBits(modelId: modelId)
 
         // Detect MoE
-        let isMoE = config.numExperts != nil && (config.numExperts ?? 0) > 1
-        let numExperts = config.numExperts
-        let numActiveExperts = config.numExpertsPerTok
+        let numExperts = config.numExperts ?? config.textConfig?.numExperts
+        let numActiveExperts = config.numExpertsPerTok ?? config.textConfig?.numExpertsPerTok
+        let isMoE = (numExperts ?? 0) > 1
 
         // Measure weight file sizes on disk (only for MoE to avoid slow walks on dense models)
         let weightSize = isMoE ? measureWeightFiles(directory: modelDirectory) : 0

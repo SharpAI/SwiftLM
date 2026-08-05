@@ -346,6 +346,8 @@ struct MLXServer: AsyncParsableCommand {
             // and erroneous auto-capping of draft tokens.
             if let profile = mainModelProfile, !profile.isMoE {
                 print("[SwiftLM] ⚠️  Model does not support SSD expert streaming (\(profile.modelType) is not MoE). Ignoring --stream-experts flag.")
+                print("[SwiftLM]    No routed-expert count found in config.json (num_local_experts / num_experts / n_routed_experts).")
+                print("[SwiftLM]    If this model *is* MoE, please report it — see issue #112.")
                 self.streamExperts = false
             }
         }

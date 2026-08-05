@@ -118,6 +118,44 @@ final class ModelProfilerMoEDetectionTests: XCTestCase {
         XCTAssertEqual(p.numLayers, 48, "layer count must still come from text_config")
     }
 
+    /// The exact config shape from the runtime validation on #114:
+    /// `lmstudio-community/Qwen3.6-35B-A3B-MLX-8bit` — a multimodal MoE whose
+    /// top level carries no expert keys at all, only `vision_config` and a
+    /// `text_config` holding `num_experts`. Reported as `qwen3_5_moe is not MoE`
+    /// before the fix, with the model profiled at a few GB instead of 37.7 GB.
+    func testQwen36VisionMoENestedConfig() throws {
+        let p = try profile(config: """
+        {
+          "model_type": "qwen3_5_moe",
+          "architectures": ["Qwen3_5_MoeForConditionalGeneration"],
+          "image_token_id": 151655,
+          "vision_config": { "depth": 27, "hidden_size": 1152 },
+          "text_config": {
+            "model_type": "qwen3_5_moe_text",
+            "num_hidden_layers": 40,
+            "hidden_size": 2048,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 2,
+            "head_dim": 256,
+            "vocab_size": 248320,
+            "num_experts": 256,
+            "num_experts_per_tok": 8,
+            "moe_intermediate_size": 512
+          }
+        }
+        """, modelId: "lmstudio-community/Qwen3.6-35B-A3B-MLX-8bit")
+
+        XCTAssertTrue(p.isMoE)
+        // The counts must come from text_config. Without the nested lookup these are
+        // nil even though the model_type heuristic would still flag the model as MoE,
+        // so this is what distinguishes a real fix from an accidental pass.
+        XCTAssertEqual(p.numExperts, 256)
+        XCTAssertEqual(p.numActiveExperts, 8)
+        XCTAssertEqual(p.numLayers, 40, "layer count must come from text_config")
+        XCTAssertEqual(p.numKVHeads, 2)
+        XCTAssertEqual(p.headDim, 256)
+    }
+
     // MARK: Fallback + negative cases
 
     /// A config using an expert-count key we have not seen still profiles as MoE

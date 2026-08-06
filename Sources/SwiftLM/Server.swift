@@ -1733,8 +1733,14 @@ struct ThinkingStateTracker {
     /// opening tag against the last closing tag distinguishes the two cases.
     static func opensUnclosedThinkingBlock(_ prompt: String) -> Bool {
         func lastRange(of tags: [String]) -> Range<String.Index>? {
+            // Latest start wins; on a tie the longest tag wins, so `<thinking>` is
+            // never resolved as `<think>` + "ing>" regardless of openTags order.
             tags.compactMap { prompt.range(of: $0, options: .backwards) }
-                .max { $0.lowerBound < $1.lowerBound }
+                .max { a, b in
+                    a.lowerBound == b.lowerBound
+                        ? a.upperBound < b.upperBound
+                        : a.lowerBound < b.lowerBound
+                }
         }
         guard let lastOpen = lastRange(of: openTags) else { return false }
         if let lastClose = lastRange(of: closeTags), lastClose.lowerBound > lastOpen.lowerBound {
@@ -1961,18 +1967,29 @@ func handleChatStreaming(
                     continue  // skip normal emit while buffering or just flushed
                 }
 
+                // ── Stop sequence check BEFORE feeding the tracker ──
+                // The stop sequence itself must never reach the client, so only the
+                // slice of this chunk that survives the trim may enter the state
+                // machine. (An earlier revision fed the whole chunk first and emitted
+                // the tracker's output verbatim, which leaked the stop string and
+                // anything after it — review finding on #115. The pre-review code had
+                // the opposite bug: its arithmetic assumed everything before this chunk
+                // was already emitted, dropping text the tracker was holding.)
+                let stopHit = checkStopSequences(fullText, stopSequences: stopSequences)
+                let survivingText: String
+                if let (trimmedFull, _) = stopHit {
+                    let priorCount = fullText.count - text.count
+                    survivingText = String(text.prefix(max(0, trimmedFull.count - priorCount)))
+                } else {
+                    survivingText = text
+                }
+
                 // ── Route text through thinking state machine ──
                 let (reasoningText, contentText) = enableThinking
-                    ? tracker.process(text)
-                    : ("", text)
+                    ? tracker.process(survivingText)
+                    : ("", survivingText)
 
-                // ── Stop sequence check (operate on full accumulated text) ──
-                if let (trimmedFull, _) = checkStopSequences(fullText, stopSequences: stopSequences) {
-                    // This chunk was already fed to the tracker above; emit what that
-                    // produced rather than re-processing a slice of fullText. The old
-                    // arithmetic assumed everything before this chunk had been emitted,
-                    // which is false whenever the tracker is holding a partial tag — the
-                    // held text was then dropped instead of sent (#108).
+                if stopHit != nil {
                     if !reasoningText.isEmpty || !contentText.isEmpty {
                         cont.yield(sseChunk(modelId: modelId,
                                             reasoningContent: reasoningText.isEmpty ? nil : reasoningText,

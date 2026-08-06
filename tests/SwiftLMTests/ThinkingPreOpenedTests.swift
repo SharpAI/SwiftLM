@@ -143,6 +143,12 @@ final class ThinkingPreOpenedTests: XCTestCase {
         XCTAssertEqual(c, "")
     }
 
+    /// The lastRange tie rule must not depend on openTags ordering: at the same start
+    /// position, `<thinking>` wins over its own `<think>` prefix (review finding on #115).
+    func testThinkingTagAtPromptEndDetectedRegardlessOfTagOrder() {
+        XCTAssertTrue(ThinkingStateTracker.opensUnclosedThinkingBlock("<|im_start|>assistant\n<thinking>\n"))
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     // MARK: - 3. End-of-stream flush (tail truncation)
     // ═══════════════════════════════════════════════════════════════════

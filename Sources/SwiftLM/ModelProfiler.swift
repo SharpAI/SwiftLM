@@ -175,7 +175,13 @@ enum ModelProfiler {
         let headDim: Int?
         let intermediateSize: Int?
         let vocabSize: Int?
-        let numExperts: Int?
+        // Expert-count spellings differ per architecture family (see `numExperts`):
+        //   num_local_experts  → Mixtral, Phi-MoE
+        //   num_experts        → Qwen3 / Qwen3.5 MoE, Kimi
+        //   n_routed_experts   → DeepSeek V2/V3, GLM4 MoE, MiniMax
+        let numLocalExperts: Int?
+        let numExpertsKey: Int?
+        let nRoutedExperts: Int?
         let numExpertsPerTok: Int?
         let quantizationConfig: QuantConfig?
         let textConfig: TextConfig?
@@ -189,10 +195,39 @@ enum ModelProfiler {
             case headDim = "head_dim"
             case intermediateSize = "intermediate_size"
             case vocabSize = "vocab_size"
-            case numExperts = "num_local_experts"
+            case numLocalExperts = "num_local_experts"
+            case numExpertsKey = "num_experts"
+            case nRoutedExperts = "n_routed_experts"
             case numExpertsPerTok = "num_experts_per_tok"
             case quantizationConfig = "quantization_config"
             case textConfig = "text_config"
+        }
+
+        /// Every positive routed-expert count present, in precedence order: this
+        /// architecture's own spelling first, then the nested `text_config` used by
+        /// multimodal wrappers. Non-positive values are placeholders (a vision wrapper's
+        /// `"num_experts": 0`), not declarations, so they are dropped here — which also
+        /// means a lone `0` leaves the count absent and the model_type heuristic still
+        /// applies, rather than silently re-opening the #112 OOM path.
+        var expertCountCandidates: [Int] {
+            [
+                numLocalExperts, numExpertsKey, nRoutedExperts,
+                textConfig?.numLocalExperts, textConfig?.numExpertsKey, textConfig?.nRoutedExperts,
+            ].compactMap { $0 }.filter { $0 > 0 }
+        }
+
+        /// Routed-expert count: the first positive value in precedence order. Taking the
+        /// first — rather than preferring any value > 1 — keeps an explicit outer count
+        /// of 1 authoritative over a stale nested count left behind by a dense
+        /// conversion, while the positivity filter above stops a `0` placeholder from
+        /// masking the real nested value.
+        var numExperts: Int? {
+            expertCountCandidates.first
+        }
+
+        var activeExperts: Int? {
+            [numExpertsPerTok, textConfig?.numExpertsPerTok]
+                .compactMap { $0 }.first { $0 > 0 }
         }
     }
 
@@ -204,6 +239,10 @@ enum ModelProfiler {
         let headDim: Int?
         let intermediateSize: Int?
         let vocabSize: Int?
+        let numLocalExperts: Int?
+        let numExpertsKey: Int?
+        let nRoutedExperts: Int?
+        let numExpertsPerTok: Int?
 
         enum CodingKeys: String, CodingKey {
             case numHiddenLayers = "num_hidden_layers"
@@ -213,6 +252,10 @@ enum ModelProfiler {
             case headDim = "head_dim"
             case intermediateSize = "intermediate_size"
             case vocabSize = "vocab_size"
+            case numLocalExperts = "num_local_experts"
+            case numExpertsKey = "num_experts"
+            case nRoutedExperts = "n_routed_experts"
+            case numExpertsPerTok = "num_experts_per_tok"
         }
     }
 
@@ -251,16 +294,27 @@ enum ModelProfiler {
         // Detect quantization
         let quantBits = config.quantizationConfig?.bits ?? detectQuantBits(modelId: modelId)
 
-        // Detect MoE
-        let isMoE = config.numExperts != nil && (config.numExperts ?? 0) > 1
+        // Detect MoE.
+        //
+        // Issue #112: expert counts are spelled differently per architecture family,
+        // so relying on a single key silently misclassified Qwen3.5-MoE / DeepSeek /
+        // GLM MoE models as dense. That disabled --stream-experts and made the server
+        // materialise the full model, which the OS then OOM-killed. `config.numExperts`
+        // now consults every known spelling.
+        //
+        // An explicit count is authoritative in both directions: a config that says it
+        // has one expert is dense, whatever its model_type is called. The model_type
+        // heuristic applies only when no known key was present at all.
         let numExperts = config.numExperts
-        let numActiveExperts = config.numExpertsPerTok
+        let numActiveExperts = config.activeExperts
+        let modelType = config.modelType ?? "unknown"
+        let isMoE = numExperts.map { $0 > 1 } ?? modelTypeImpliesMoE(modelType)
 
         // Measure weight file sizes on disk (only for MoE to avoid slow walks on dense models)
         let weightSize = isMoE ? measureWeightFiles(directory: modelDirectory) : 0
 
         return ModelProfile(
-            modelType: config.modelType ?? "unknown",
+            modelType: modelType,
             numLayers: numLayers,
             hiddenSize: hiddenSize,
             numAttentionHeads: numHeads,
@@ -275,6 +329,20 @@ enum ModelProfiler {
             weightFileSizeBytes: weightSize,
             modelId: modelId
         )
+    }
+
+    /// Last-resort MoE detection for configs whose expert-count key we do not know.
+    /// Reached only when no known expert key was present at all.
+    ///
+    /// A false positive is not free: it clears the guard in Server.swift, which then
+    /// enables lazy loading, activates SSD expert streaming and overrides the MLX
+    /// memory and cache limits. It is still the safer direction — that path only runs
+    /// when the user explicitly passed --stream-experts, whereas a false negative
+    /// materialises the whole model and gets the process OOM-killed (issue #112).
+    static func modelTypeImpliesMoE(_ modelType: String) -> Bool {
+        let normalized = modelType.lowercased()
+        if normalized.contains("moe") { return true }
+        return ["mixtral", "dbrx", "grok"].contains { normalized.contains($0) }
     }
 
     /// Detect quantization bits from model ID string patterns.

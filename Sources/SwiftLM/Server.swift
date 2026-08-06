@@ -346,6 +346,10 @@ struct MLXServer: AsyncParsableCommand {
             // and erroneous auto-capping of draft tokens.
             if let profile = mainModelProfile, !profile.isMoE {
                 print("[SwiftLM] ⚠️  Model does not support SSD expert streaming (\(profile.modelType) is not MoE). Ignoring --stream-experts flag.")
+                let countDescription = profile.numExperts.map { "routed-expert count is \($0)" }
+                    ?? "no routed-expert count found in config.json (num_local_experts / num_experts / n_routed_experts)"
+                print("[SwiftLM]    \(countDescription).")
+                print("[SwiftLM]    If this model *is* MoE, please report it — see issue #112.")
                 self.streamExperts = false
             }
         }
@@ -1491,6 +1495,22 @@ func handleChatCompletion(
     let promptTokenCount = lmInput.text.tokens.size
     let promptTokens = lmInput.text.tokens.asArray(Int.self)
 
+    // ── Issue #108: does the template leave the thinking block open? ──
+    // Qwen3/3.5/3.6 templates append `<think>\n` to the generation prompt when
+    // enable_thinking is true, so the model emits reasoning with no opening tag of
+    // its own and the parser would misfile all of it as response content. Decoding
+    // the prompt tail detects this without hard-coding any particular template:
+    // 32 tokens comfortably covers the trailing `<|im_start|>assistant\n<think>\n`
+    // while keeping the decode negligible.
+    var thinkingPreOpened = false
+    if enableThinking {
+        let tail = await container.tokenizer.decode(tokenIds: Array(promptTokens.suffix(32)), skipSpecialTokens: false)
+        thinkingPreOpened = ThinkingStateTracker.opensUnclosedThinkingBlock(tail)
+        if thinkingPreOpened {
+            print("[SwiftLM] Chat template pre-opened the thinking block — parsing output as reasoning until the closing tag.")
+        }
+    }
+
     // llama-server style: announce prefill start
     print("srv  slot_launch: id 0 | prompt=\(promptTokenCount)t | thinking=\(enableThinking) | prefilling...")
     fflush(stdout)
@@ -1544,7 +1564,8 @@ func handleChatCompletion(
             return handleChatStreaming(
                 stream: genStream, modelId: modelId, stopSequences: stopSequences,
                 includeUsage: includeUsage, promptTokenCount: promptTokenCount,
-                enableThinking: enableThinking, jsonMode: jsonMode, semaphore: semaphore,
+                enableThinking: enableThinking, thinkingPreOpened: thinkingPreOpened,
+                jsonMode: jsonMode, semaphore: semaphore,
                 stats: stats, genStart: genStart, prefillStart: prefillStart,
                 emitPrefillProgress: false, onPrefillDone: nil
             )
@@ -1552,7 +1573,7 @@ func handleChatCompletion(
             return try await handleChatNonStreaming(
                 stream: genStream, modelId: modelId, stopSequences: stopSequences,
                 promptTokenCount: promptTokenCount, enableThinking: enableThinking,
-                jsonMode: jsonMode, semaphore: semaphore,
+                thinkingPreOpened: thinkingPreOpened, jsonMode: jsonMode, semaphore: semaphore,
                 stats: stats, genStart: genStart, prefillStart: prefillStart, onPrefillDone: nil
             )
         }
@@ -1670,7 +1691,8 @@ func handleChatCompletion(
         return handleChatStreaming(
             stream: stream, modelId: modelId, stopSequences: stopSequences,
             includeUsage: includeUsage, promptTokenCount: promptTokenCount,
-            enableThinking: enableThinking, jsonMode: jsonMode, semaphore: semaphore,
+            enableThinking: enableThinking, thinkingPreOpened: thinkingPreOpened,
+            jsonMode: jsonMode, semaphore: semaphore,
             stats: stats, genStart: genStart, prefillStart: prefillStart,
             emitPrefillProgress: emitPrefillProgress, onPrefillDone: onPrefillDone
         )
@@ -1678,7 +1700,7 @@ func handleChatCompletion(
         return try await handleChatNonStreaming(
             stream: stream, modelId: modelId, stopSequences: stopSequences,
             promptTokenCount: promptTokenCount, enableThinking: enableThinking,
-            jsonMode: jsonMode, semaphore: semaphore,
+            thinkingPreOpened: thinkingPreOpened, jsonMode: jsonMode, semaphore: semaphore,
             stats: stats, genStart: genStart, prefillStart: prefillStart, onPrefillDone: onPrefillDone
         )
     }
@@ -1695,6 +1717,47 @@ struct ThinkingStateTracker {
     private(set) var phase: Phase = .responding
     private var buffer = ""  // accumulates chars looking for tag boundaries
 
+    /// Opening/closing tag spellings, longest-first so `<thinking>` is preferred
+    /// over the `<think>` prefix when both could match.
+    static let openTags = ["<thinking>", "<think>", "<|channel>thought\n", "<|channel>thought"]
+    static let closeTags = ["</thinking>", "</think>", "<channel|>"]
+
+    /// - Parameter startInThinking: true when the chat template already emitted an
+    ///   unclosed opening tag at the end of the prompt, so the model's first token
+    ///   is reasoning rather than response text (issue #108).
+    init(startInThinking: Bool = false) {
+        self.phase = startInThinking ? .thinking : .responding
+    }
+
+    /// Whether a rendered prompt ends inside an unclosed thinking block.
+    ///
+    /// Qwen3/3.5/3.6 templates append `<think>\n` to the generation prompt when
+    /// enable_thinking is true (and `<think>\n\n</think>\n\n` when it is false), so
+    /// the opening tag never appears in the model's own output. Comparing the last
+    /// opening tag against the last closing tag distinguishes the two cases.
+    static func opensUnclosedThinkingBlock(_ prompt: String) -> Bool {
+        func lastRange(of tags: [String]) -> Range<String.Index>? {
+            // Latest start wins; on a tie the longest tag wins, so `<thinking>` is
+            // never resolved as `<think>` + "ing>" regardless of openTags order.
+            tags.compactMap { prompt.range(of: $0, options: .backwards) }
+                .max { a, b in
+                    a.lowerBound == b.lowerBound
+                        ? a.upperBound < b.upperBound
+                        : a.lowerBound < b.lowerBound
+                }
+        }
+        guard let lastOpen = lastRange(of: openTags) else { return false }
+        if let lastClose = lastRange(of: closeTags), lastClose.lowerBound > lastOpen.lowerBound {
+            return false
+        }
+        // The tag must be the last thing in the prompt. A template that pre-opens always
+        // ends `…<|im_start|>assistant\n<think>\n`, whereas a `<think>` mentioned in the
+        // conversation itself is followed by more text — and treating that as pre-opened
+        // would route the model's entire answer into reasoning_content, leaving content
+        // empty (e.g. a user asking "explain the <think> tag").
+        return prompt[lastOpen.upperBound...].allSatisfy { $0.isWhitespace }
+    }
+
     /// Feed the next text fragment. Returns (reasoningContent, responseContent)
     /// where either value may be empty but never both non-empty simultaneously.
     mutating func process(_ text: String) -> (reasoning: String, content: String) {
@@ -1705,13 +1768,13 @@ struct ThinkingStateTracker {
         while !buffer.isEmpty {
             switch phase {
             case .responding:
-                let startRange = buffer.range(of: "<thinking>") ?? buffer.range(of: "<think>") ?? buffer.range(of: "<|channel>thought\n") ?? buffer.range(of: "<|channel>thought")
+                let startRange = Self.firstRange(in: buffer, of: Self.openTags)
                 if let range = startRange {
                     // Flush text before the tag as response content
                     content += String(buffer[buffer.startIndex..<range.lowerBound])
                     buffer.removeSubrange(buffer.startIndex..<range.upperBound)
                     phase = .thinking
-                } else if isSuffixOfTag(buffer, tags: ["<think>", "<thinking>", "<|channel>thought\n", "<|channel>thought"]) {
+                } else if isSuffixOfTag(buffer, tags: Self.openTags) {
                     // Partial tag — hold in buffer until we know more
                     return (reasoning, content)
                 } else {
@@ -1719,13 +1782,13 @@ struct ThinkingStateTracker {
                     buffer = ""
                 }
             case .thinking:
-                let endRange = buffer.range(of: "</thinking>") ?? buffer.range(of: "</think>") ?? buffer.range(of: "<channel|>")
+                let endRange = Self.firstRange(in: buffer, of: Self.closeTags)
                 if let range = endRange {
                     // Flush reasoning before the closing tag
                     reasoning += String(buffer[buffer.startIndex..<range.lowerBound])
                     buffer.removeSubrange(buffer.startIndex..<range.upperBound)
                     phase = .responding
-                } else if isSuffixOfTag(buffer, tags: ["</think>", "</thinking>", "<channel|>"]) {
+                } else if isSuffixOfTag(buffer, tags: Self.closeTags) {
                     // Partial closing tag — hold in buffer
                     return (reasoning, content)
                 } else {
@@ -1735,6 +1798,24 @@ struct ThinkingStateTracker {
             }
         }
         return (reasoning, content)
+    }
+
+    /// Drains any text still held in the buffer waiting on a partial tag that never
+    /// completed. Call once when generation ends, otherwise a response whose final
+    /// characters look like the start of a tag (e.g. a trailing "<") is silently
+    /// truncated (issue #108).
+    mutating func flush() -> (reasoning: String, content: String) {
+        defer { buffer = "" }
+        guard !buffer.isEmpty else { return ("", "") }
+        return phase == .thinking ? (buffer, "") : ("", buffer)
+    }
+
+    /// Earliest match of any tag, preferring the longest tag when several start at
+    /// the same offset (so `<thinking>` is not consumed as `<think>` + "ing>").
+    private static func firstRange(in s: String, of tags: [String]) -> Range<String.Index>? {
+        tags.compactMap { s.range(of: $0) }.min { a, b in
+            a.lowerBound == b.lowerBound ? a.upperBound > b.upperBound : a.lowerBound < b.lowerBound
+        }
     }
 
     private func isSuffixOfTag(_ s: String, tags: [String]) -> Bool {
@@ -1767,6 +1848,7 @@ func handleChatStreaming(
     includeUsage: Bool,
     promptTokenCount: Int,
     enableThinking: Bool = false,
+    thinkingPreOpened: Bool = false,
     jsonMode: Bool = false,
     semaphore: AsyncSemaphore,
     stats: ServerStats,
@@ -1816,7 +1898,7 @@ func handleChatStreaming(
         var fullText = ""
         var stopped = false
         var firstToken = true
-        var tracker = ThinkingStateTracker()
+        var tracker = ThinkingStateTracker(startInThinking: enableThinking && thinkingPreOpened)
         // Unconditional cleanup: guarantees heartbeat is cancelled on ALL exit paths
         // (normal completion, client disconnect, or task cancellation during prefill).
         defer {
@@ -1889,20 +1971,42 @@ func handleChatStreaming(
                     continue  // skip normal emit while buffering or just flushed
                 }
 
+                // ── Stop sequence check BEFORE feeding the tracker ──
+                // The stop sequence itself must never reach the client, so only the
+                // slice of this chunk that survives the trim may enter the state
+                // machine. (An earlier revision fed the whole chunk first and emitted
+                // the tracker's output verbatim, which leaked the stop string and
+                // anything after it — review finding on #115. The pre-review code had
+                // the opposite bug: its arithmetic assumed everything before this chunk
+                // was already emitted, dropping text the tracker was holding.)
+                let stopHit = checkStopSequences(fullText, stopSequences: stopSequences)
+                let survivingText: String
+                if let (trimmedFull, _) = stopHit {
+                    let priorCount = fullText.count - text.count
+                    survivingText = String(text.prefix(max(0, trimmedFull.count - priorCount)))
+                } else {
+                    survivingText = text
+                }
+
                 // ── Route text through thinking state machine ──
                 let (reasoningText, contentText) = enableThinking
-                    ? tracker.process(text)
-                    : ("", text)
+                    ? tracker.process(survivingText)
+                    : ("", survivingText)
 
-                // ── Stop sequence check (operate on full accumulated text) ──
-                if let (trimmedFull, _) = checkStopSequences(fullText, stopSequences: stopSequences) {
-                    // Emit any final partial content that hasn't been sent yet
-                    let emittedSoFar = fullText.count - text.count
-                    if trimmedFull.count > emittedSoFar {
-                        let partialText = String(trimmedFull.suffix(trimmedFull.count - emittedSoFar))
-                        let (r, c) = enableThinking ? tracker.process(partialText) : ("", partialText)
-                        cont.yield(sseChunk(modelId: modelId, reasoningContent: r.isEmpty ? nil : r,
-                                            content: c.isEmpty ? nil : c, finishReason: nil))
+                if stopHit != nil {
+                    if !reasoningText.isEmpty || !contentText.isEmpty {
+                        cont.yield(sseChunk(modelId: modelId,
+                                            reasoningContent: reasoningText.isEmpty ? nil : reasoningText,
+                                            content: contentText.isEmpty ? nil : contentText,
+                                            finishReason: nil))
+                    }
+                    // Drain anything still held for a partial tag that never completed.
+                    if enableThinking {
+                        let (r, c) = tracker.flush()
+                        if !r.isEmpty || !c.isEmpty {
+                            cont.yield(sseChunk(modelId: modelId, reasoningContent: r.isEmpty ? nil : r,
+                                                content: c.isEmpty ? nil : c, finishReason: nil))
+                        }
                     }
                     cont.yield(sseChunk(modelId: modelId, reasoningContent: nil, content: nil, finishReason: "stop"))
                     let genDur = Date().timeIntervalSince(genStart)
@@ -1946,6 +2050,17 @@ func handleChatStreaming(
                         reason = "length"
                     case .cancelled, .stop:
                         reason = hasToolCalls ? "tool_calls" : "stop"
+                    }
+                    // Drain text the tracker was holding on a partial tag that never
+                    // completed, otherwise the tail of the response is dropped (#108).
+                    if enableThinking {
+                        let (r, c) = tracker.flush()
+                        if !r.isEmpty || !c.isEmpty {
+                            cont.yield(sseChunk(modelId: modelId,
+                                                reasoningContent: r.isEmpty ? nil : r,
+                                                content: c.isEmpty ? nil : c,
+                                                finishReason: nil))
+                        }
                     }
                     cont.yield(sseChunk(modelId: modelId, reasoningContent: nil, content: nil, finishReason: reason))
                     let genDur = Date().timeIntervalSince(genStart)
@@ -2003,6 +2118,7 @@ func handleChatNonStreaming(
     stopSequences: [String],
     promptTokenCount: Int,
     enableThinking: Bool = false,
+    thinkingPreOpened: Bool = false,
     jsonMode: Bool = false,
     semaphore: AsyncSemaphore,
     stats: ServerStats,
@@ -2074,7 +2190,7 @@ func handleChatNonStreaming(
     var responseContent = fullText
     if enableThinking {
         print("srv debug: pre-extract fullText=\(fullText.prefix(40).debugDescription)")
-        let (extracted, remaining) = extractThinkingBlock(from: fullText)
+        let (extracted, remaining) = extractThinkingBlock(from: fullText, alreadyOpen: thinkingPreOpened)
         print("srv debug: extracted=\(extracted != nil ? "true" : "false"), remaining_len=\(remaining.count)")
         if let extracted {
             reasoningContent = extracted
@@ -2133,10 +2249,29 @@ func handleChatNonStreaming(
 }
 
 /// Returns (thinkingContent, remainingContent) or (nil, original) if no block found.
-func extractThinkingBlock(from text: String) -> (String?, String) {
+///
+/// - Parameter alreadyOpen: true when the chat template pre-opened the thinking block
+///   at the end of the prompt, so `text` starts *inside* the block with no opening tag
+///   of its own (issue #108). Everything up to the first closing tag is reasoning.
+func extractThinkingBlock(from text: String, alreadyOpen: Bool = false) -> (String?, String) {
     let startTag = text.range(of: "<thinking>") ?? text.range(of: "<think>") ?? text.range(of: "<|channel>thought\n") ?? text.range(of: "<|channel>thought") ?? (text.hasPrefix("thought\n") ? text.range(of: "thought\n") : nil)
     let endTag = text.range(of: "</thinking>") ?? text.range(of: "</think>") ?? text.range(of: "<channel|>")
-    
+
+    // Template pre-opened the block. Only a tag at the very start means the model
+    // re-emitted its own opening tag; a tag further in is the model *talking about* one
+    // from inside its reasoning, and deferring to the tag path there silently discarded
+    // everything before it. This matches the streaming tracker, which stays in the
+    // thinking phase until a closing tag.
+    if alreadyOpen, startTag.map({ $0.lowerBound != text.startIndex }) ?? true {
+        guard let endRange = endTag else {
+            // Still thinking when generation stopped — no response content yet.
+            return (text.isEmpty ? nil : text, "")
+        }
+        let thinking = String(text[text.startIndex..<endRange.lowerBound])
+        let remaining = String(text[endRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (thinking.isEmpty ? nil : thinking, remaining)
+    }
+
     guard let startRange = startTag, let endRange = endTag else {
         // If there's an unclosed thinking block (still thinking when stopped)
         if let startRange = startTag {

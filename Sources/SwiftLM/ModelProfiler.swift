@@ -203,11 +203,21 @@ enum ModelProfiler {
             case textConfig = "text_config"
         }
 
-        /// Routed-expert count under whichever key this architecture uses,
-        /// falling back to the nested `text_config` used by multimodal wrappers.
+        /// Every routed-expert count present, in precedence order: this architecture's
+        /// own spelling first, then the nested `text_config` used by multimodal wrappers.
+        var expertCountCandidates: [Int] {
+            [
+                numLocalExperts, numExpertsKey, nRoutedExperts,
+                textConfig?.numLocalExperts, textConfig?.numExpertsKey, textConfig?.nRoutedExperts,
+            ].compactMap { $0 }
+        }
+
+        /// Routed-expert count. Prefers a plausible count over a degenerate one, so a
+        /// top-level `"num_experts": 0` placeholder in a multimodal wrapper cannot mask a
+        /// real count nested under `text_config`.
         var numExperts: Int? {
-            numLocalExperts ?? numExpertsKey ?? nRoutedExperts
-                ?? textConfig?.numLocalExperts ?? textConfig?.numExpertsKey ?? textConfig?.nRoutedExperts
+            let candidates = expertCountCandidates
+            return candidates.first { $0 > 1 } ?? candidates.first
         }
 
         var activeExperts: Int? {
@@ -284,12 +294,15 @@ enum ModelProfiler {
         // so relying on a single key silently misclassified Qwen3.5-MoE / DeepSeek /
         // GLM MoE models as dense. That disabled --stream-experts and made the server
         // materialise the full model, which the OS then OOM-killed. `config.numExperts`
-        // now consults every known spelling; the model_type check is a last-resort
-        // fallback for families that name the key something we have not seen yet.
+        // now consults every known spelling.
+        //
+        // An explicit count is authoritative in both directions: a config that says it
+        // has one expert is dense, whatever its model_type is called. The model_type
+        // heuristic applies only when no known key was present at all.
         let numExperts = config.numExperts
         let numActiveExperts = config.activeExperts
         let modelType = config.modelType ?? "unknown"
-        let isMoE = (numExperts ?? 0) > 1 || modelTypeImpliesMoE(modelType)
+        let isMoE = numExperts.map { $0 > 1 } ?? modelTypeImpliesMoE(modelType)
 
         // Measure weight file sizes on disk (only for MoE to avoid slow walks on dense models)
         let weightSize = isMoE ? measureWeightFiles(directory: modelDirectory) : 0
@@ -313,10 +326,15 @@ enum ModelProfiler {
     }
 
     /// Last-resort MoE detection for configs whose expert-count key we do not know.
-    /// Only used when no expert count was found, so a false positive here costs a
-    /// weight-file walk, while a false negative costs an OOM kill (issue #112).
+    /// Reached only when no known expert key was present at all.
+    ///
+    /// A false positive is not free: it clears the guard in Server.swift, which then
+    /// enables lazy loading, activates SSD expert streaming and overrides the MLX
+    /// memory and cache limits. It is still the safer direction — that path only runs
+    /// when the user explicitly passed --stream-experts, whereas a false negative
+    /// materialises the whole model and gets the process OOM-killed (issue #112).
     static func modelTypeImpliesMoE(_ modelType: String) -> Bool {
-        let normalized = modelType.lowercased().replacingOccurrences(of: "-", with: "_")
+        let normalized = modelType.lowercased()
         if normalized.contains("moe") { return true }
         return ["mixtral", "dbrx", "grok"].contains { normalized.contains($0) }
     }

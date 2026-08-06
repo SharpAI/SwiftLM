@@ -172,6 +172,43 @@ final class ModelProfilerMoEDetectionTests: XCTestCase {
         XCTAssertNil(p.numExperts, "no known expert key present, so the count stays unknown")
     }
 
+    /// An explicit expert count wins over the model_type heuristic. A config that says
+    /// it has one expert is dense even when its name contains "moe" — otherwise a
+    /// dense-converted or ablation checkpoint would enable SSD streaming with no experts
+    /// to stream (review finding on #114).
+    func testExplicitSingleExpertBeatsModelTypeHeuristic() throws {
+        let p = try profile(config: """
+        {
+          \(baseKeys(modelType: "qwen3_5_moe")),
+          "num_experts": 1
+        }
+        """)
+
+        XCTAssertFalse(p.isMoE, "an explicit count of 1 is authoritative over the name heuristic")
+        XCTAssertEqual(p.numExperts, 1)
+    }
+
+    /// A degenerate top-level value must not mask a real count nested under text_config.
+    /// Multimodal wrappers can carry a placeholder at the top level (review finding on #114).
+    func testDegenerateTopLevelDoesNotShadowNestedCount() throws {
+        let p = try profile(config: """
+        {
+          "model_type": "some_wrapper",
+          "num_experts": 0,
+          "text_config": {
+            "num_hidden_layers": 40,
+            "hidden_size": 2048,
+            "num_experts": 128,
+            "num_experts_per_tok": 8
+          }
+        }
+        """)
+
+        XCTAssertTrue(p.isMoE, "the nested count is the real one")
+        XCTAssertEqual(p.numExperts, 128, "a top-level 0 must not shadow text_config")
+        XCTAssertEqual(p.numActiveExperts, 8)
+    }
+
     func testModelTypeHeuristic() {
         for type in ["qwen3_5_moe", "glm4_moe", "GLM-MoE", "mixtral", "dbrx", "grok_1"] {
             XCTAssertTrue(ModelProfiler.modelTypeImpliesMoE(type), "\(type) should imply MoE")

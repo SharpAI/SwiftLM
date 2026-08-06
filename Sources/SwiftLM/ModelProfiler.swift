@@ -203,25 +203,31 @@ enum ModelProfiler {
             case textConfig = "text_config"
         }
 
-        /// Every routed-expert count present, in precedence order: this architecture's
-        /// own spelling first, then the nested `text_config` used by multimodal wrappers.
+        /// Every positive routed-expert count present, in precedence order: this
+        /// architecture's own spelling first, then the nested `text_config` used by
+        /// multimodal wrappers. Non-positive values are placeholders (a vision wrapper's
+        /// `"num_experts": 0`), not declarations, so they are dropped here — which also
+        /// means a lone `0` leaves the count absent and the model_type heuristic still
+        /// applies, rather than silently re-opening the #112 OOM path.
         var expertCountCandidates: [Int] {
             [
                 numLocalExperts, numExpertsKey, nRoutedExperts,
                 textConfig?.numLocalExperts, textConfig?.numExpertsKey, textConfig?.nRoutedExperts,
-            ].compactMap { $0 }
+            ].compactMap { $0 }.filter { $0 > 0 }
         }
 
-        /// Routed-expert count. Prefers a plausible count over a degenerate one, so a
-        /// top-level `"num_experts": 0` placeholder in a multimodal wrapper cannot mask a
-        /// real count nested under `text_config`.
+        /// Routed-expert count: the first positive value in precedence order. Taking the
+        /// first — rather than preferring any value > 1 — keeps an explicit outer count
+        /// of 1 authoritative over a stale nested count left behind by a dense
+        /// conversion, while the positivity filter above stops a `0` placeholder from
+        /// masking the real nested value.
         var numExperts: Int? {
-            let candidates = expertCountCandidates
-            return candidates.first { $0 > 1 } ?? candidates.first
+            expertCountCandidates.first
         }
 
         var activeExperts: Int? {
-            numExpertsPerTok ?? textConfig?.numExpertsPerTok
+            [numExpertsPerTok, textConfig?.numExpertsPerTok]
+                .compactMap { $0 }.first { $0 > 0 }
         }
     }
 

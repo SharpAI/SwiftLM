@@ -209,6 +209,36 @@ final class ModelProfilerMoEDetectionTests: XCTestCase {
         XCTAssertEqual(p.numActiveExperts, 8)
     }
 
+    /// A lone explicit 0 is a placeholder, not a declaration: the heuristic must still
+    /// apply, or a wrapper whose real count uses an unknown spelling would profile as
+    /// dense and re-open the #112 OOM path (review finding on #114).
+    func testLoneZeroDoesNotSuppressHeuristic() throws {
+        let p = try profile(config: """
+        {
+          \(baseKeys(modelType: "some_new_moe")),
+          "num_experts": 0
+        }
+        """)
+
+        XCTAssertTrue(p.isMoE, "a 0 placeholder must not veto the model_type heuristic")
+        XCTAssertNil(p.numExperts)
+    }
+
+    /// An explicit outer count of 1 stays authoritative even when a stale nested count
+    /// survives from the base model of a dense conversion (review finding on #114).
+    func testExplicitOneBeatsStaleNestedCount() throws {
+        let p = try profile(config: """
+        {
+          \(baseKeys(modelType: "custom_arch")),
+          "num_local_experts": 1,
+          "text_config": { "num_experts": 128 }
+        }
+        """)
+
+        XCTAssertFalse(p.isMoE, "outer explicit 1 wins over a stale nested 128")
+        XCTAssertEqual(p.numExperts, 1)
+    }
+
     func testModelTypeHeuristic() {
         for type in ["qwen3_5_moe", "glm4_moe", "GLM-MoE", "mixtral", "dbrx", "grok_1"] {
             XCTAssertTrue(ModelProfiler.modelTypeImpliesMoE(type), "\(type) should imply MoE")

@@ -245,8 +245,12 @@ final class ModelStorageLayoutTests: XCTestCase {
             root.appendingPathComponent("HandCopied"),
         ]
 
-        // Each of these reduces to the cache root or the `models/` wrapper.
-        for hostile in ["", "models", "models/", "/models", "models//", "./models", "..", "../..", "a/.."] {
+        // Each of these reduces to the cache root or the `models/` wrapper. The case
+        // variants matter because APFS is case-insensitive by default: "Models" and
+        // "models" are the same directory while a string compare says otherwise
+        // (review finding on #116). "models/mlx-community" guards a whole org.
+        for hostile in ["", "models", "models/", "/models", "models//", "./models", "..", "../..", "a/..",
+                        "Models", "MODELS", "Models/", "models/mlx-community"] {
             try? ModelStorage.delete(hostile)
             XCTAssertTrue(FileManager.default.fileExists(atPath: root.path),
                           "cache root removed by delete(\"\(hostile)\")")
@@ -261,6 +265,9 @@ final class ModelStorageLayoutTests: XCTestCase {
     func testIsSafeModelDirectoryRejectsRootAndWrapper() {
         XCTAssertFalse(ModelStorage.isSafeModelDirectory(root))
         XCTAssertFalse(ModelStorage.isSafeModelDirectory(root.appendingPathComponent("models")))
+        XCTAssertFalse(ModelStorage.isSafeModelDirectory(root.appendingPathComponent("Models")))
+        XCTAssertFalse(ModelStorage.isSafeModelDirectory(root.appendingPathComponent("MODELS")))
+        XCTAssertFalse(ModelStorage.isSafeModelDirectory(root.appendingPathComponent("models/mlx-community")))
         XCTAssertFalse(ModelStorage.isSafeModelDirectory(root.appendingPathComponent("..")))
         XCTAssertFalse(ModelStorage.isSafeModelDirectory(root.deletingLastPathComponent()))
         XCTAssertTrue(ModelStorage.isSafeModelDirectory(root.appendingPathComponent("SomeModel")))

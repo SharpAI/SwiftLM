@@ -81,8 +81,12 @@ public enum ModelStorage {
     /// compare strings: an id of `"models/"`, `"/models"` or `"./models"` all reduce to
     /// `<cacheRoot>/models`, and `".."` components escape the root entirely.
     static func isSafeModelDirectory(_ url: URL) -> Bool {
-        let root = cacheRoot.standardizedFileURL
-        let candidate = url.standardizedFileURL
+        // Resolve symlinks on both sides: standardizedFileURL alone is lexical, so a
+        // symlink component under the root could point anywhere and still look like a
+        // descendant. Resolving both sides keeps the comparison in one namespace
+        // (/var vs /private/var) and lets the descendant check see the real target.
+        let root = cacheRoot.resolvingSymlinksInPath().standardizedFileURL
+        let candidate = url.resolvingSymlinksInPath().standardizedFileURL
         let rootComponents = root.pathComponents
         let candidateComponents = candidate.pathComponents
 
@@ -91,9 +95,15 @@ public enum ModelStorage {
             Array(candidateComponents.prefix(rootComponents.count)) == rootComponents
         else { return false }
 
-        // Never the shared layout wrapper itself.
-        let relative = candidateComponents.dropFirst(rootComponents.count)
-        if relative.count == 1 && relative.first == "models" { return false }
+        // Never the shared layout wrapper or anything directly inside it that is not a
+        // concrete model (i.e. the wrapper itself or an org directory). macOS APFS is
+        // case-insensitive by default, so "Models" and "models" are the same directory
+        // while == on the strings is not — a case-sensitive compare here let
+        // delete("Models") wipe every downloaded model (review finding on #116).
+        let relative = Array(candidateComponents.dropFirst(rootComponents.count))
+        let isWrapperName =
+            relative[0].compare("models", options: [.caseInsensitive]) == .orderedSame
+        if isWrapperName && relative.count < 3 { return false }
         return true
     }
 
@@ -400,7 +410,7 @@ public enum ModelStorage {
                     .replacingOccurrences(of: "^models--", with: "", options: .regularExpression)
                     .replacingOccurrences(of: "--", with: "/")
                 addScannedModelIfDownloaded(modelId: modelId, dir: dir, resultsById: &resultsById)
-            } else if dir.lastPathComponent == "models" {
+            } else if dir.lastPathComponent.compare("models", options: [.caseInsensitive]) == .orderedSame {
                 guard let organizations = try? FileManager.default.contentsOfDirectory(
                     at: dir,
                     includingPropertiesForKeys: [.contentModificationDateKey],
@@ -565,7 +575,7 @@ public enum ModelStorage {
                     .replacingOccurrences(of: "^models--", with: "", options: .regularExpression)
                     .replacingOccurrences(of: "--", with: "/")
                 addIncompleteDownloadIfNeeded(modelId: modelId, dir: dir, resultsById: &resultsById)
-            } else if dir.lastPathComponent == "models" {
+            } else if dir.lastPathComponent.compare("models", options: [.caseInsensitive]) == .orderedSame {
                 guard let organizations = try? FileManager.default.contentsOfDirectory(
                     at: dir,
                     includingPropertiesForKeys: [.contentModificationDateKey],

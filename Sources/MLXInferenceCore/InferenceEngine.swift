@@ -354,7 +354,17 @@ public final class InferenceEngine: ObservableObject {
             // loadWeights() initialises ExpertStreamerManager correctly.
             // lazyLoad=true means weights are mmap'd and not paged into RAM
             // at load time — only active expert pages touch RAM during inference.
-            var config = ModelConfiguration(id: modelId)
+            // A model the user copied in by hand does not live at the materialized
+            // `<cacheRoot>/models/<id>` path that ModelConfiguration(id:) resolves
+            // through HubApi. Recognising those layouts in the scan (issue #110) without
+            // pointing the loader at them would list the model and then re-download it —
+            // several GB for a model already on disk. Load such models by directory.
+            var config: ModelConfiguration
+            if let localDirectory = ModelStorage.localLoadDirectory(for: modelId) {
+                config = ModelConfiguration(directory: localDirectory)
+            } else {
+                config = ModelConfiguration(id: modelId)
+            }
             let isMoE = ModelCatalog.all.first(where: { $0.id == modelId })?.isMoE ?? false
             let generationConfig = GenerationConfig.load()
             if generationConfig.enableMTP {

@@ -231,14 +231,40 @@ final class ModelStorageLayoutTests: XCTestCase {
 
     // MARK: - 6. Deletion safety
 
-    /// delete() walks the directories associated with an id. A bogus id must not
-    /// resolve to the cache root or the shared `models/` wrapper.
-    func testPlainDirectoryNeverResolvesToCacheRootOrModelsWrapper() throws {
+    /// delete() calls removeItem on every directory associated with an id, so a bogus id
+    /// must never resolve to the cache root or the shared `models/` wrapper. The earlier
+    /// version of this test only checked plainDirectory's return value and never called
+    /// delete(), so it passed even while `delete("models/")` wiped the whole tree.
+    func testDeleteWithHostileIdsLeavesTheCacheIntact() throws {
         try makeModel(at: "models/mlx-community/Qwen3-4B-4bit")
+        try makeModel(at: "models/mlx-community/Qwen3-8B-4bit")
+        try makeModel(at: "HandCopied")
+        let survivors = [
+            root.appendingPathComponent("models/mlx-community/Qwen3-4B-4bit"),
+            root.appendingPathComponent("models/mlx-community/Qwen3-8B-4bit"),
+            root.appendingPathComponent("HandCopied"),
+        ]
 
-        XCTAssertNil(ModelStorage.plainDirectory(for: ""))
-        XCTAssertNil(ModelStorage.plainDirectory(for: "models"))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+        // Each of these reduces to the cache root or the `models/` wrapper.
+        for hostile in ["", "models", "models/", "/models", "models//", "./models", "..", "../..", "a/.."] {
+            try? ModelStorage.delete(hostile)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: root.path),
+                          "cache root removed by delete(\"\(hostile)\")")
+            for survivor in survivors {
+                XCTAssertTrue(FileManager.default.fileExists(atPath: survivor.path),
+                              "delete(\"\(hostile)\") removed \(survivor.lastPathComponent)")
+            }
+        }
+        XCTAssertEqual(scannedIds().count, 3, "no model should have been deleted")
+    }
+
+    func testIsSafeModelDirectoryRejectsRootAndWrapper() {
+        XCTAssertFalse(ModelStorage.isSafeModelDirectory(root))
+        XCTAssertFalse(ModelStorage.isSafeModelDirectory(root.appendingPathComponent("models")))
+        XCTAssertFalse(ModelStorage.isSafeModelDirectory(root.appendingPathComponent("..")))
+        XCTAssertFalse(ModelStorage.isSafeModelDirectory(root.deletingLastPathComponent()))
+        XCTAssertTrue(ModelStorage.isSafeModelDirectory(root.appendingPathComponent("SomeModel")))
+        XCTAssertTrue(ModelStorage.isSafeModelDirectory(root.appendingPathComponent("models/org/name")))
     }
 
     func testDeleteRemovesHandCopiedFolder() throws {

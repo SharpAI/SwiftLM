@@ -8,8 +8,9 @@ public enum ModelStorage {
 
     // MARK: — Platform Paths
 
-    /// Test hook: when set, overrides `cacheRoot` entirely.
-    nonisolated(unsafe) public static var cacheRootOverride: URL?
+    /// Test hook: when set, overrides `cacheRoot` entirely. Deliberately not public —
+    /// tests reach it through `@testable import`.
+    nonisolated(unsafe) static var cacheRootOverride: URL?
 
     /// Root directory where model files are stored on this platform.
     /// This is the `downloadBase` passed to `HubApi`.
@@ -59,18 +60,41 @@ public enum ModelStorage {
     /// A model folder copied straight into the cache root, with no `models--` prefix
     /// and no `snapshots/` level — e.g. `<cacheRoot>/Qwen3.5-27B-oQ6/` or
     /// `<cacheRoot>/mlx-community/Qwen3.5-27B-oQ6/` (issue #110).
-    public static func plainDirectory(for modelId: String) -> URL? {
-        // An empty or "models" id would resolve to the cache root / hub layout root,
-        // which must never be treated as a model directory (delete() walks these).
-        guard !modelId.isEmpty, modelId != "models" else { return nil }
-        let dir = plainDirectoryURL(for: modelId)
+    static func plainDirectory(for modelId: String) -> URL? {
+        guard let dir = plainDirectoryURL(for: modelId) else { return nil }
         return directoryExists(dir) ? dir : nil
     }
 
-    private static func plainDirectoryURL(for modelId: String) -> URL {
-        modelId.split(separator: "/").reduce(cacheRoot) { url, component in
+    private static func plainDirectoryURL(for modelId: String) -> URL? {
+        let url = modelId.split(separator: "/").reduce(cacheRoot) { url, component in
             url.appendingPathComponent(String(component), isDirectory: true)
         }
+        return isSafeModelDirectory(url) ? url : nil
+    }
+
+    /// Whether a URL is a location a model may legitimately occupy, i.e. a strict
+    /// descendant of the cache root that is neither the root itself nor the shared
+    /// `models/` wrapper.
+    ///
+    /// `delete()` calls `FileManager.removeItem` on the directories associated with an
+    /// id, so this is a destructive-action guard and must resolve the path rather than
+    /// compare strings: an id of `"models/"`, `"/models"` or `"./models"` all reduce to
+    /// `<cacheRoot>/models`, and `".."` components escape the root entirely.
+    static func isSafeModelDirectory(_ url: URL) -> Bool {
+        let root = cacheRoot.standardizedFileURL
+        let candidate = url.standardizedFileURL
+        let rootComponents = root.pathComponents
+        let candidateComponents = candidate.pathComponents
+
+        // Must be strictly below the cache root, by at least one component.
+        guard candidateComponents.count > rootComponents.count,
+            Array(candidateComponents.prefix(rootComponents.count)) == rootComponents
+        else { return false }
+
+        // Never the shared layout wrapper itself.
+        let relative = candidateComponents.dropFirst(rootComponents.count)
+        if relative.count == 1 && relative.first == "models" { return false }
+        return true
     }
 
     /// Swift Hub's materialized repository directory.
@@ -146,6 +170,17 @@ public enum ModelStorage {
             (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
         }
         return directories.count == 1 ? directories[0] : nil
+    }
+
+    /// The directory to load a model from when it does not live at the materialized
+    /// `<cacheRoot>/models/<id>` path that `HubApi` resolves, i.e. when the user copied
+    /// it in by hand or it came from `huggingface-cli`. Returns nil when the standard
+    /// path applies, so callers keep the normal id-based flow (and its download
+    /// behaviour) for everything else.
+    public static func localLoadDirectory(for modelId: String) -> URL? {
+        guard materializedDirectory(for: modelId) == nil else { return nil }
+        guard isDownloaded(modelId) else { return nil }
+        return modelContentDirectories(for: modelId).first
     }
 
     public static func isDownloaded(_ modelId: String) -> Bool {
@@ -612,6 +647,11 @@ public enum ModelStorage {
         if let plain = plainDirectory(for: modelId) {
             candidates.append(plain)
         }
+        // Every path here is a removeItem target. An empty id makes
+        // appendingPathComponent("") a no-op, so materializedDirectoryURL(for: "")
+        // resolves to the shared `models/` wrapper and would delete every downloaded
+        // model; the same guard covers `..` escapes on any of the three layouts.
+        candidates = candidates.filter { isSafeModelDirectory($0) }
 
         var seen = Set<String>()
         return candidates.filter { url in

@@ -1732,12 +1732,20 @@ struct ThinkingStateTracker {
     /// the opening tag never appears in the model's own output. Comparing the last
     /// opening tag against the last closing tag distinguishes the two cases.
     static func opensUnclosedThinkingBlock(_ prompt: String) -> Bool {
-        func lastIndex(of tags: [String]) -> String.Index? {
-            tags.compactMap { prompt.range(of: $0, options: .backwards)?.lowerBound }.max()
+        func lastRange(of tags: [String]) -> Range<String.Index>? {
+            tags.compactMap { prompt.range(of: $0, options: .backwards) }
+                .max { $0.lowerBound < $1.lowerBound }
         }
-        guard let lastOpen = lastIndex(of: openTags) else { return false }
-        guard let lastClose = lastIndex(of: closeTags) else { return true }
-        return lastOpen > lastClose
+        guard let lastOpen = lastRange(of: openTags) else { return false }
+        if let lastClose = lastRange(of: closeTags), lastClose.lowerBound > lastOpen.lowerBound {
+            return false
+        }
+        // The tag must be the last thing in the prompt. A template that pre-opens always
+        // ends `…<|im_start|>assistant\n<think>\n`, whereas a `<think>` mentioned in the
+        // conversation itself is followed by more text — and treating that as pre-opened
+        // would route the model's entire answer into reasoning_content, leaving content
+        // empty (e.g. a user asking "explain the <think> tag").
+        return prompt[lastOpen.upperBound...].allSatisfy { $0.isWhitespace }
     }
 
     /// Feed the next text fragment. Returns (reasoningContent, responseContent)
@@ -1960,13 +1968,24 @@ func handleChatStreaming(
 
                 // ── Stop sequence check (operate on full accumulated text) ──
                 if let (trimmedFull, _) = checkStopSequences(fullText, stopSequences: stopSequences) {
-                    // Emit any final partial content that hasn't been sent yet
-                    let emittedSoFar = fullText.count - text.count
-                    if trimmedFull.count > emittedSoFar {
-                        let partialText = String(trimmedFull.suffix(trimmedFull.count - emittedSoFar))
-                        let (r, c) = enableThinking ? tracker.process(partialText) : ("", partialText)
-                        cont.yield(sseChunk(modelId: modelId, reasoningContent: r.isEmpty ? nil : r,
-                                            content: c.isEmpty ? nil : c, finishReason: nil))
+                    // This chunk was already fed to the tracker above; emit what that
+                    // produced rather than re-processing a slice of fullText. The old
+                    // arithmetic assumed everything before this chunk had been emitted,
+                    // which is false whenever the tracker is holding a partial tag — the
+                    // held text was then dropped instead of sent (#108).
+                    if !reasoningText.isEmpty || !contentText.isEmpty {
+                        cont.yield(sseChunk(modelId: modelId,
+                                            reasoningContent: reasoningText.isEmpty ? nil : reasoningText,
+                                            content: contentText.isEmpty ? nil : contentText,
+                                            finishReason: nil))
+                    }
+                    // Drain anything still held for a partial tag that never completed.
+                    if enableThinking {
+                        let (r, c) = tracker.flush()
+                        if !r.isEmpty || !c.isEmpty {
+                            cont.yield(sseChunk(modelId: modelId, reasoningContent: r.isEmpty ? nil : r,
+                                                content: c.isEmpty ? nil : c, finishReason: nil))
+                        }
                     }
                     cont.yield(sseChunk(modelId: modelId, reasoningContent: nil, content: nil, finishReason: "stop"))
                     let genDur = Date().timeIntervalSince(genStart)
@@ -2217,9 +2236,12 @@ func extractThinkingBlock(from text: String, alreadyOpen: Bool = false) -> (Stri
     let startTag = text.range(of: "<thinking>") ?? text.range(of: "<think>") ?? text.range(of: "<|channel>thought\n") ?? text.range(of: "<|channel>thought") ?? (text.hasPrefix("thought\n") ? text.range(of: "thought\n") : nil)
     let endTag = text.range(of: "</thinking>") ?? text.range(of: "</think>") ?? text.range(of: "<channel|>")
 
-    // Template pre-opened the block and the model did not re-emit an opening tag:
-    // treat the start of the text as the start of the reasoning.
-    if alreadyOpen, startTag == nil {
+    // Template pre-opened the block. Only a tag at the very start means the model
+    // re-emitted its own opening tag; a tag further in is the model *talking about* one
+    // from inside its reasoning, and deferring to the tag path there silently discarded
+    // everything before it. This matches the streaming tracker, which stays in the
+    // thinking phase until a closing tag.
+    if alreadyOpen, startTag.map({ $0.lowerBound != text.startIndex }) ?? true {
         guard let endRange = endTag else {
             // Still thinking when generation stopped — no response content yet.
             return (text.isEmpty ? nil : text, "")

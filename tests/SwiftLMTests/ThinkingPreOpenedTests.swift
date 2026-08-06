@@ -64,6 +64,22 @@ final class ThinkingPreOpenedTests: XCTestCase {
         XCTAssertFalse(ThinkingStateTracker.opensUnclosedThinkingBlock("<|channel>thought\n<channel|>"))
     }
 
+    /// A `<think>` the *user* wrote must not be mistaken for a pre-opened block. Before
+    /// this guard, asking about the tag routed the model's entire answer into
+    /// reasoning_content and left content empty (review finding on #115).
+    func testTagMentionedInPromptIsNotPreOpened() {
+        let mentions = [
+            "explain the <think> tag<|im_end|>\n<|im_start|>assistant\n",
+            "<think> appears in Qwen templates.<|im_end|>\n<|im_start|>assistant\n",
+        ]
+        for tail in mentions {
+            XCTAssertFalse(ThinkingStateTracker.opensUnclosedThinkingBlock(tail),
+                           "a tag followed by more text is not a pre-opened block: \(tail)")
+        }
+        // Trailing whitespace after the tag is still a pre-open (the template's form).
+        XCTAssertTrue(ThinkingStateTracker.opensUnclosedThinkingBlock("<|im_start|>assistant\n<think>\n  "))
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     // MARK: - 2. Streaming with a pre-opened block
     // ═══════════════════════════════════════════════════════════════════
@@ -201,6 +217,16 @@ final class ThinkingPreOpenedTests: XCTestCase {
         let (thinking, remaining) = extractThinkingBlock(from: text, alreadyOpen: true)
         XCTAssertEqual(thinking, "reasoning")
         XCTAssertEqual(remaining, "answer")
+    }
+
+    /// With the block pre-opened, a tag the model mentions *inside* its reasoning must
+    /// not cause the text before it to be discarded (review finding on #115).
+    func testExtractPreOpenedKeepsTextBeforeAMentionedTag() {
+        let text = "The user asked about <think> tags.\n</think>\nAnswer."
+        let (thinking, remaining) = extractThinkingBlock(from: text, alreadyOpen: true)
+        XCTAssertEqual(thinking, "The user asked about <think> tags.\n",
+                       "leading reasoning must not be dropped")
+        XCTAssertEqual(remaining, "Answer.")
     }
 
     /// Truncated mid-reasoning: all reasoning, no content.

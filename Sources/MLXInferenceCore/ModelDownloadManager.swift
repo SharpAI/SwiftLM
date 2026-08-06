@@ -58,6 +58,9 @@ public final class ModelDownloadManager: ObservableObject {
     @Published public private(set) var networkStatus: NetworkStatus = .unknown
 
     private var downloadedModelIDs: Set<String> = []
+    /// Paths already reported by the unrecognized-directory diagnostic (issue #110),
+    /// so refreshing the models view does not reprint the same lines.
+    private var loggedUnrecognizedPaths: Set<String> = []
 
     // MARK: Persistence
     private let lastModelKey = "swiftlm.lastLoadedModelId"
@@ -122,6 +125,23 @@ public final class ModelDownloadManager: ObservableObject {
 
     // MARK: — Storage
 
+    /// Re-scan off the main actor, then publish on it.
+    ///
+    /// `refresh()` walks every model directory recursively (integrity, size, incomplete
+    /// files, diagnostics). That is seconds of work on a large cache, and the models view
+    /// calls it on every appearance, so it must not run on the main actor (issue #110
+    /// review).
+    public func refreshInBackground() {
+        Task.detached(priority: .utility) { [weak self] in
+            let scanned = ModelStorage.scanDownloadedModels()
+            let incomplete = ModelStorage.scanIncompleteDownloads()
+            let unrecognized = ModelStorage.diagnoseUnrecognizedDirectories(knownModels: scanned)
+            await MainActor.run {
+                self?.apply(scanned: scanned, incomplete: incomplete, unrecognized: unrecognized)
+            }
+        }
+    }
+
     /// Re-scan the cache and update published state.
     public func refresh() {
         let scanned = ModelStorage.scanDownloadedModels()
@@ -142,6 +162,39 @@ public final class ModelDownloadManager: ObservableObject {
                 // Exclude models that are already actively downloading
                 !activeDownloads.keys.contains(incomplete.id)
             }
+
+        // Issue #110: a folder that looks like a model but fails verification used to
+        // vanish silently, indistinguishable from one the app never looked at. Log the
+        // reason once per distinct set so repeated refreshes stay quiet.
+        logUnrecognized(ModelStorage.diagnoseUnrecognizedDirectories(knownModels: scanned))
+    }
+
+    private func apply(
+        scanned: [ModelStorage.ScannedModel],
+        incomplete: [ModelStorage.IncompleteDownload],
+        unrecognized: [(directory: URL, reason: String)]
+    ) {
+        downloadedModels = scanned.map { s in
+            DownloadedModel(
+                id: s.modelId,
+                cacheDirectory: s.cacheDirectory,
+                sizeBytes: s.sizeBytes,
+                modifiedDate: s.modifiedDate
+            )
+        }
+        downloadedModelIDs = Set(downloadedModels.map(\.id))
+        totalDiskUsageBytes = downloadedModels.reduce(0) { $0 + $1.sizeBytes }
+        incompleteDownloads = incomplete.filter { !activeDownloads.keys.contains($0.id) }
+        logUnrecognized(unrecognized)
+    }
+
+    private func logUnrecognized(_ unrecognized: [(directory: URL, reason: String)]) {
+        let paths = Set(unrecognized.map(\.directory.path))
+        guard paths != loggedUnrecognizedPaths else { return }
+        loggedUnrecognizedPaths = paths
+        for finding in unrecognized {
+            print("[ModelStorage] Not listed: \(finding.directory.path) — \(finding.reason)")
+        }
     }
 
     public func isDownloaded(_ modelId: String) -> Bool {

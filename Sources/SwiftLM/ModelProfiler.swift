@@ -175,14 +175,6 @@ enum ModelProfiler {
         let headDim: Int?
         let intermediateSize: Int?
         let vocabSize: Int?
-        // Expert-count spellings differ per architecture family (see `numExperts`):
-        //   num_local_experts  → Mixtral, Phi-MoE
-        //   num_experts        → Qwen3 / Qwen3.5 MoE, Kimi
-        //   n_routed_experts   → DeepSeek V2/V3, GLM4 MoE, MiniMax
-        let numLocalExperts: Int?
-        let numExpertsKey: Int?
-        let nRoutedExperts: Int?
-        let numExpertsPerTok: Int?
         let quantizationConfig: QuantConfig?
         let textConfig: TextConfig?
 
@@ -195,39 +187,8 @@ enum ModelProfiler {
             case headDim = "head_dim"
             case intermediateSize = "intermediate_size"
             case vocabSize = "vocab_size"
-            case numLocalExperts = "num_local_experts"
-            case numExpertsKey = "num_experts"
-            case nRoutedExperts = "n_routed_experts"
-            case numExpertsPerTok = "num_experts_per_tok"
             case quantizationConfig = "quantization_config"
             case textConfig = "text_config"
-        }
-
-        /// Every positive routed-expert count present, in precedence order: this
-        /// architecture's own spelling first, then the nested `text_config` used by
-        /// multimodal wrappers. Non-positive values are placeholders (a vision wrapper's
-        /// `"num_experts": 0`), not declarations, so they are dropped here — which also
-        /// means a lone `0` leaves the count absent and the model_type heuristic still
-        /// applies, rather than silently re-opening the #112 OOM path.
-        var expertCountCandidates: [Int] {
-            [
-                numLocalExperts, numExpertsKey, nRoutedExperts,
-                textConfig?.numLocalExperts, textConfig?.numExpertsKey, textConfig?.nRoutedExperts,
-            ].compactMap { $0 }.filter { $0 > 0 }
-        }
-
-        /// Routed-expert count: the first positive value in precedence order. Taking the
-        /// first — rather than preferring any value > 1 — keeps an explicit outer count
-        /// of 1 authoritative over a stale nested count left behind by a dense
-        /// conversion, while the positivity filter above stops a `0` placeholder from
-        /// masking the real nested value.
-        var numExperts: Int? {
-            expertCountCandidates.first
-        }
-
-        var activeExperts: Int? {
-            [numExpertsPerTok, textConfig?.numExpertsPerTok]
-                .compactMap { $0 }.first { $0 > 0 }
         }
     }
 
@@ -239,10 +200,6 @@ enum ModelProfiler {
         let headDim: Int?
         let intermediateSize: Int?
         let vocabSize: Int?
-        let numLocalExperts: Int?
-        let numExpertsKey: Int?
-        let nRoutedExperts: Int?
-        let numExpertsPerTok: Int?
 
         enum CodingKeys: String, CodingKey {
             case numHiddenLayers = "num_hidden_layers"
@@ -252,10 +209,6 @@ enum ModelProfiler {
             case headDim = "head_dim"
             case intermediateSize = "intermediate_size"
             case vocabSize = "vocab_size"
-            case numLocalExperts = "num_local_experts"
-            case numExpertsKey = "num_experts"
-            case nRoutedExperts = "n_routed_experts"
-            case numExpertsPerTok = "num_experts_per_tok"
         }
     }
 
@@ -279,7 +232,13 @@ enum ModelProfiler {
             return nil
         }
 
-        guard let config = try? JSONDecoder().decode(ModelConfig.self, from: configData) else {
+        let config: ModelConfig
+        do {
+            config = try JSONDecoder().decode(ModelConfig.self, from: configData)
+        } catch {
+            // Silence here meant a profile of nil with no explanation, on the very code
+            // path whose original bug (#112) was a diagnosability failure.
+            print("[ModelProfiler] Could not parse \(configURL.path): \(error)")
             return nil
         }
 
@@ -299,14 +258,17 @@ enum ModelProfiler {
         // Issue #112: expert counts are spelled differently per architecture family,
         // so relying on a single key silently misclassified Qwen3.5-MoE / DeepSeek /
         // GLM MoE models as dense. That disabled --stream-experts and made the server
-        // materialise the full model, which the OS then OOM-killed. `config.numExperts`
-        // now consults every known spelling.
+        // materialise the full model, which the OS then OOM-killed. findExpertCounts
+        // walks the raw config for every known spelling, at any nesting depth.
         //
         // An explicit count is authoritative in both directions: a config that says it
         // has one expert is dense, whatever its model_type is called. The model_type
         // heuristic applies only when no known key was present at all.
-        let numExperts = config.numExperts
-        let numActiveExperts = config.activeExperts
+        let rawConfig = (try? JSONSerialization.jsonObject(with: configData)) as? [String: Any]
+        let expertCounts: (total: Int?, active: Int?) =
+            rawConfig.map { findExpertCounts(in: $0) } ?? (total: nil, active: nil)
+        let numExperts = expertCounts.total
+        let numActiveExperts = expertCounts.active
         let modelType = config.modelType ?? "unknown"
         let isMoE = numExperts.map { $0 > 1 } ?? modelTypeImpliesMoE(modelType)
 
@@ -329,6 +291,85 @@ enum ModelProfiler {
             weightFileSizeBytes: weightSize,
             modelId: modelId
         )
+    }
+
+    /// Routed-expert count keys, in precedence order within a container.
+    private static let expertTotalKeys = ["num_local_experts", "num_experts", "n_routed_experts"]
+
+    /// Sub-config containers that hold a language model, tried before other children so
+    /// the result does not depend on dictionary iteration order. Qwen3-Omni carries a
+    /// count under both `talker_config` and `thinker_config` with *different* active
+    /// counts, so an unordered walk would report a different number run to run.
+    private static let languageContainerPriority = [
+        "text_config", "thinker_config", "language_config", "language_model",
+        "llm_config", "decoder_config",
+    ]
+
+    /// Containers that are definitely not the language model. Without this, a count in a
+    /// shallower non-LM container outranks the real one nested deeper — the priority list
+    /// only orders siblings within a level, it cannot stop the walk descending into an
+    /// encoder that happens to be MoE.
+    private static let nonLanguageContainers: Set<String> = [
+        "vision_config", "audio_config", "code2wav_config", "projector_config",
+        "visual", "vision_tower", "audio_tower", "speech_config", "image_config",
+    ]
+
+    /// Finds the routed-expert count by walking nested containers breadth-first.
+    ///
+    /// Multimodal wrappers nest the language model at varying depths and under varying
+    /// names — `text_config` (Qwen3.5-VL), `language_config` (DeepSeek-VL2, whose
+    /// model_type contains no "moe" so nothing else would catch it), and
+    /// `thinker_config.text_config` two levels down (Qwen3-Omni). Breadth-first keeps an
+    /// outer explicit count authoritative over one nested deeper, and non-positive
+    /// values are skipped as placeholders (issue #112 and its review follow-ups).
+    static func findExpertCounts(in root: [String: Any], maxDepth: Int = 3)
+        -> (total: Int?, active: Int?)
+    {
+        // Carried down so a container that declares a total but no per-token count can
+        // inherit one from an ancestor, which is how wrappers that hoist
+        // `num_experts_per_tok` to the top level are written.
+        var level: [(container: [String: Any], inheritedActive: Int?)] = [(root, nil)]
+        var depth = 0
+        while !level.isEmpty && depth <= maxDepth {
+            for (container, inheritedActive) in level {
+                for key in expertTotalKeys {
+                    guard let total = intValue(container[key]), total > 0 else { continue }
+                    // Prefer this container's own per-token count; fall back to the
+                    // nearest ancestor that had one.
+                    let own = intValue(container["num_experts_per_tok"]).flatMap { $0 > 0 ? $0 : nil }
+                    return (total, own ?? inheritedActive)
+                }
+            }
+            var next: [(container: [String: Any], inheritedActive: Int?)] = []
+            for (container, inheritedActive) in level {
+                let childKeys = container.keys.filter {
+                    container[$0] is [String: Any] && !nonLanguageContainers.contains($0)
+                }
+                let ordered =
+                    languageContainerPriority.filter(childKeys.contains)
+                    + childKeys.filter { !languageContainerPriority.contains($0) }.sorted()
+                let activeHere =
+                    intValue(container["num_experts_per_tok"]).flatMap { $0 > 0 ? $0 : nil }
+                    ?? inheritedActive
+                for key in ordered {
+                    if let child = container[key] as? [String: Any] {
+                        next.append((child, activeHere))
+                    }
+                }
+            }
+            level = next
+            depth += 1
+        }
+        return (nil, nil)
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        switch value {
+        case let v as Int: return v
+        case let v as NSNumber: return v.intValue
+        case let v as String: return Int(v)
+        default: return nil
+        }
     }
 
     /// Last-resort MoE detection for configs whose expert-count key we do not know.

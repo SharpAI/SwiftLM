@@ -83,6 +83,59 @@ public struct DFlashDraftConfiguration: Codable, Sendable {
             case maskTokenId = "mask_token_id"
         }
     }
+
+    /// Newer checkpoints nest rope settings under `rope_parameters` instead of flat
+    /// top-level keys (transformers' migration); `z-lab/Qwen3.5-4B-DFlash` ships only
+    /// the nested form, so requiring flat `rope_theta` failed the whole decode with
+    /// keyNotFound and the draft model never loaded (issue #121).
+    private struct RopeParameters: Codable, Sendable {
+        var ropeTheta: Float?
+
+        enum CodingKeys: String, CodingKey {
+            case ropeTheta = "rope_theta"
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Synthesized Codable treats every listed key as required regardless of the
+        // property defaults above; decodeIfPresent restores their intended meaning.
+        modelType = try c.decodeIfPresent(String.self, forKey: .modelType) ?? modelType
+        hiddenSize = try c.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? hiddenSize
+        numHiddenLayers = try c.decodeIfPresent(Int.self, forKey: .numHiddenLayers) ?? numHiddenLayers
+        intermediateSize = try c.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? intermediateSize
+        numAttentionHeads = try c.decodeIfPresent(Int.self, forKey: .numAttentionHeads) ?? numAttentionHeads
+        rmsNormEps = try c.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? rmsNormEps
+        vocabularySize = try c.decodeIfPresent(Int.self, forKey: .vocabularySize) ?? vocabularySize
+        numKeyValueHeads = try c.decodeIfPresent(Int.self, forKey: .numKeyValueHeads) ?? numKeyValueHeads
+        maxPositionEmbeddings =
+            try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? maxPositionEmbeddings
+        headDim = try c.decodeIfPresent(Int.self, forKey: .headDim) ?? headDim
+        tieWordEmbeddings = try c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? tieWordEmbeddings
+        numTargetLayers = try c.decodeIfPresent(Int.self, forKey: .numTargetLayers) ?? numTargetLayers
+        blockSize = try c.decodeIfPresent(Int.self, forKey: .blockSize) ?? blockSize
+        attentionBias = try c.decodeIfPresent(Bool.self, forKey: .attentionBias) ?? attentionBias
+        attentionDropout = try c.decodeIfPresent(Float.self, forKey: .attentionDropout) ?? attentionDropout
+        ropeScaling = try c.decodeIfPresent([String: StringOrNumber].self, forKey: .ropeScaling)
+        layerTypes = try c.decodeIfPresent([String].self, forKey: .layerTypes) ?? layerTypes
+        dflashConfig = try c.decodeIfPresent(DFlashConfig.self, forKey: .dflashConfig)
+
+        // rope_theta: flat key first (older checkpoints), then rope_parameters.rope_theta.
+        if let flat = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) {
+            ropeTheta = flat
+        } else {
+            let extended = try decoder.container(keyedBy: ExtendedCodingKeys.self)
+            if let nested = try extended.decodeIfPresent(RopeParameters.self, forKey: .ropeParameters),
+                let theta = nested.ropeTheta
+            {
+                ropeTheta = theta
+            }
+        }
+    }
+
+    private enum ExtendedCodingKeys: String, CodingKey {
+        case ropeParameters = "rope_parameters"
+    }
 }
 
 // MARK: - Helper: build target layer IDs

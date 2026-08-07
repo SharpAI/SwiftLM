@@ -501,6 +501,17 @@ public enum ModelStorage {
         if countIncompleteFiles(in: directory) > 0 {
             return "contains .incomplete files — finish or delete the partial download"
         }
+        // Check the metadata first: validateModelFiles rejects a zero-byte config.json
+        // or tokenizer.json before it ever looks at weights, so reporting a weights
+        // reason there sent the user to inspect the wrong file (review finding on #116).
+        for name in ["config.json", "tokenizer.json"] {
+            let path = directory.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: path.path) else {
+                if name == "config.json" { return "config.json is missing" }
+                continue
+            }
+            if fileSizeResolvingSymlink(path) == 0 { return "\(name) is empty (0 bytes)" }
+        }
         let indexPath = directory.appendingPathComponent("model.safetensors.index.json")
         let hasIndex = FileManager.default.fileExists(atPath: indexPath.path)
         let single = directory.appendingPathComponent("model.safetensors")
@@ -512,6 +523,9 @@ public enum ModelStorage {
                 return "no .safetensors weights found (GGUF and .npz models are not supported)"
             }
             return "sharded weights present but model.safetensors.index.json is missing"
+        }
+        if !hasIndex {
+            return "model.safetensors is present but too small to be valid"
         }
         return "weight files missing or truncated relative to model.safetensors.index.json"
     }

@@ -327,6 +327,12 @@ struct MLXServer: AsyncParsableCommand {
             } else {
                 modelConfig = ModelConfiguration(id: modelId)
             }
+        } else if let localDirectory = ModelStorage.localLoadDirectory(for: modelId) {
+            // The model is already on disk in a layout HubApi does not resolve — copied
+            // in by hand, or written by huggingface-cli. Loading it by id would miss on
+            // disk and re-download several GB of a model the user already has (#110).
+            print("[SwiftLM] Loading from local cache: \(localDirectory.path)")
+            modelConfig = ModelConfiguration(directory: localDirectory)
         } else {
             modelConfig = ModelConfiguration(id: modelId)
         }

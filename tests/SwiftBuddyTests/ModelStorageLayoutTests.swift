@@ -196,6 +196,45 @@ final class ModelStorageLayoutTests: XCTestCase {
                       "got: \(findings.map { "\($0.directory.path): \($0.reason)" })")
     }
 
+    // MARK: - 4b. localLoadDirectory — which models must bypass the id-based loader
+    //
+    // A model that is on disk in a layout HubApi cannot resolve must be loaded by
+    // directory, or selecting it re-downloads several GB (review finding on #116).
+
+    func testLocalLoadDirectoryForHandCopiedLayouts() throws {
+        try makeModel(at: "models--mlx-community--NoSnapshots")
+        try makeModel(at: "mlx-community/PlainOrg")
+        try makeModel(at: "PlainBare")
+
+        for id in ["mlx-community/NoSnapshots", "mlx-community/PlainOrg", "PlainBare"] {
+            let resolved = try XCTUnwrap(ModelStorage.localLoadDirectory(for: id),
+                                         "\(id) must load by directory, not by id")
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: resolved.appendingPathComponent("config.json").path),
+                "\(id) resolved to \(resolved.path), which holds no config.json")
+        }
+    }
+
+    /// The materialized layout is exactly what HubApi resolves, so it must keep the
+    /// id-based flow (and with it the normal revision/download semantics).
+    func testLocalLoadDirectoryIsNilForMaterializedLayout() throws {
+        try makeModel(at: "models/mlx-community/Materialized")
+        XCTAssertNil(ModelStorage.localLoadDirectory(for: "mlx-community/Materialized"))
+    }
+
+    /// A model that is not on disk at all must not be diverted from the download path.
+    func testLocalLoadDirectoryIsNilWhenAbsentOrInvalid() throws {
+        XCTAssertNil(ModelStorage.localLoadDirectory(for: "mlx-community/NotThere"))
+
+        // Present but failing verification (no weights) — still nil, so the loader
+        // downloads rather than pointing at a broken directory.
+        let dir = root.appendingPathComponent("mlx-community/NoWeights", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try #"{"model_type":"qwen3"}"#
+            .write(to: dir.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        XCTAssertNil(ModelStorage.localLoadDirectory(for: "mlx-community/NoWeights"))
+    }
+
     // MARK: - 5. snapshotDirectory resolution
     //
     // SSD expert streaming points its reader at snapshotDirectory(), so a path that

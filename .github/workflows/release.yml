@@ -114,6 +114,7 @@ jobs:
             -scheme SwiftBuddy \
             -destination "generic/platform=macOS" \
             -configuration Release \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_ENTITLEMENTS="" \

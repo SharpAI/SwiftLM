@@ -81,10 +81,13 @@ public enum ModelStorage {
     /// compare strings: an id of `"models/"`, `"/models"` or `"./models"` all reduce to
     /// `<cacheRoot>/models`, and `".."` components escape the root entirely.
     static func isSafeModelDirectory(_ url: URL) -> Bool {
-        // Resolve symlinks on both sides: standardizedFileURL alone is lexical, so a
-        // symlink component under the root could point anywhere and still look like a
-        // descendant. Resolving both sides keeps the comparison in one namespace
-        // (/var vs /private/var) and lets the descendant check see the real target.
+        // Resolve symlinks on both sides: standardizedFileURL alone is lexical, so an
+        // existing symlink component under the root could point anywhere and still look
+        // like a descendant. Note resolvingSymlinksInPath only resolves paths that
+        // exist — for a path that does not, the two sides can end up in different
+        // namespaces and the descendant check fails, i.e. it fails closed. That is the
+        // safe direction, and such paths are dropped by the directoryExists filter in
+        // associatedDirectories anyway.
         let root = cacheRoot.resolvingSymlinksInPath().standardizedFileURL
         let candidate = url.resolvingSymlinksInPath().standardizedFileURL
         let rootComponents = root.pathComponents
@@ -111,7 +114,12 @@ public enum ModelStorage {
     /// `HubApi(downloadBase: cacheRoot).snapshot(from:)` writes here.
     public static func materializedDirectory(for modelId: String) -> URL? {
         let dir = materializedDirectoryURL(for: modelId)
-        return directoryExists(dir) ? dir : nil
+        // Same guard delete() applies, so an org-less id like "gpt2" — which resolves to
+        // <root>/models/gpt2 and is rejected there — is not loadable here either. It was
+        // previously loadable but undeletable: delete() removed nothing and reported
+        // success (review finding on #116). scanDownloadedModels only emits org/name, so
+        // no listed model is affected.
+        return directoryExists(dir) && isSafeModelDirectory(dir) ? dir : nil
     }
 
     private static func materializedDirectoryURL(for modelId: String) -> URL {
@@ -189,8 +197,20 @@ public enum ModelStorage {
     /// behaviour) for everything else.
     public static func localLoadDirectory(for modelId: String) -> URL? {
         guard materializedDirectory(for: modelId) == nil else { return nil }
-        guard isDownloaded(modelId) else { return nil }
-        return modelContentDirectories(for: modelId).first
+        return validatedContentDirectory(for: modelId)
+    }
+
+    /// The first directory for this model whose files actually pass verification.
+    ///
+    /// `isDownloaded` succeeds when *any* candidate validates, so pairing it with
+    /// `modelContentDirectories.first` could hand a caller a different, broken directory
+    /// — e.g. a half-deleted `snapshots/<hash>/` that still exists while the real weights
+    /// sit in a hand-copied folder. Callers loading by directory have no download
+    /// fallback, so the directory they get must be the one that validated.
+    public static func validatedContentDirectory(for modelId: String) -> URL? {
+        guard !hasIncompleteFiles(for: modelId) else { return nil }
+        return modelContentDirectories(for: modelId)
+            .first { validateModelFiles(in: $0, logFailures: false) }
     }
 
     public static func isDownloaded(_ modelId: String) -> Bool {
@@ -515,17 +535,22 @@ public enum ModelStorage {
         let indexPath = directory.appendingPathComponent("model.safetensors.index.json")
         let hasIndex = FileManager.default.fileExists(atPath: indexPath.path)
         let single = directory.appendingPathComponent("model.safetensors")
-        let hasSingle = (fileSizeResolvingSymlink(single) ?? 0) > 1024
-        if !hasIndex && !hasSingle {
+        let singleSize = fileSizeResolvingSymlink(single)
+        if !hasIndex {
+            // A single-file model is judged on its own size before anything is said about
+            // shards — otherwise a truncated model.safetensors was reported as "sharded
+            // weights present", naming an index.json that never existed.
+            if let singleSize {
+                return singleSize > 1024
+                    ? "model.safetensors is present but the model still failed verification"
+                    : "model.safetensors is truncated (\(singleSize) bytes)"
+            }
             let shards = (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?
-                .filter { $0.hasSuffix(".safetensors") } ?? []
+                .filter { $0.hasSuffix(".safetensors") && $0 != "model.safetensors" } ?? []
             if shards.isEmpty {
                 return "no .safetensors weights found (GGUF and .npz models are not supported)"
             }
             return "sharded weights present but model.safetensors.index.json is missing"
-        }
-        if !hasIndex {
-            return "model.safetensors is present but too small to be valid"
         }
         return "weight files missing or truncated relative to model.safetensors.index.json"
     }

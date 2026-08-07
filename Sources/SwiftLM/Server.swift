@@ -327,10 +327,13 @@ struct MLXServer: AsyncParsableCommand {
             } else {
                 modelConfig = ModelConfiguration(id: modelId)
             }
-        } else if let localDirectory = ModelStorage.localLoadDirectory(for: modelId) {
-            // The model is already on disk in a layout HubApi does not resolve — copied
-            // in by hand, or written by huggingface-cli. Loading it by id would miss on
-            // disk and re-download several GB of a model the user already has (#110).
+        } else if let localDirectory = ModelStorage.validatedContentDirectory(for: modelId) {
+            // Any validated copy in the shared HF cache, in any supported layout. Note
+            // this deliberately does NOT use localLoadDirectory: that skips the
+            // materialized `models/<org>/<name>` layout on the grounds that HubApi
+            // resolves it, which is true for the app but not here — the CLI's HubApi
+            // below is rooted at Application Support, so a model the app downloaded is
+            // invisible to it and would be fetched again (#110).
             print("[SwiftLM] Loading from local cache: \(localDirectory.path)")
             modelConfig = ModelConfiguration(directory: localDirectory)
         } else {
@@ -342,7 +345,14 @@ struct MLXServer: AsyncParsableCommand {
         // planning (line ~474), so it must be declared at this scope.
         // ModelProfiler.profile() does a filesystem walk; only run it when
         // --stream-experts is active to avoid startup overhead on normal launches.
-        let modelDirectory = resolveModelDirectory(modelId: modelId)
+        // ModelStorage first: resolveModelDirectory predates the layout work and knows
+        // only ~/Library/Caches and ~/.cache with a mandatory snapshots/ level, so for a
+        // hand-copied or huggingface-cli model it returns nil — which skipped the MoE
+        // guard *and* the ExpertStreamingConfig activation while still setting lazyLoad,
+        // i.e. lazy weights with no streamer (the #112 memory shape) and no diagnostic.
+        let modelDirectory =
+            ModelStorage.validatedContentDirectory(for: modelId)
+            ?? resolveModelDirectory(modelId: modelId)
         var mainModelProfile: ModelProfile? = nil
         if self.streamExperts, let dir = modelDirectory {
             mainModelProfile = ModelProfiler.profile(modelDirectory: dir, modelId: modelId)

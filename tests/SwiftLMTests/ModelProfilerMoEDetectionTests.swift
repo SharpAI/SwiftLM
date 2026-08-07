@@ -198,14 +198,13 @@ final class ModelProfilerMoEDetectionTests: XCTestCase {
           }
         }
         """
-        // Repeat: sibling containers are dictionary-ordered, so a non-deterministic walk
-        // would only fail intermittently.
-        for _ in 0..<20 {
-            let p = try profile(config: config)
-            XCTAssertTrue(p.isMoE)
-            XCTAssertEqual(p.numExperts, 128)
-            XCTAssertEqual(p.numActiveExperts, 8, "must come from thinker_config, not talker_config")
-        }
+        // One run is enough: Swift seeds dictionary hashing per process, so repeating in
+        // this process would reproduce the same order every time. The guarantee comes
+        // from the explicit sibling ordering in findExpertCounts, not from repetition.
+        let p = try profile(config: config)
+        XCTAssertTrue(p.isMoE)
+        XCTAssertEqual(p.numExperts, 128)
+        XCTAssertEqual(p.numActiveExperts, 8, "must come from thinker_config, not talker_config")
     }
 
     /// An outer count still wins over anything nested, at any depth.
@@ -221,6 +220,39 @@ final class ModelProfilerMoEDetectionTests: XCTestCase {
 
         XCTAssertEqual(p.numExperts, 8)
         XCTAssertEqual(p.numActiveExperts, 2, "active count pairs with the container the total came from")
+    }
+
+    /// A count inside an encoder must never outrank the language model's, even though
+    /// the encoder sits at a shallower depth (review finding on #125).
+    func testNonLanguageContainersAreSkipped() throws {
+        let p = try profile(config: """
+        {
+          "model_type": "some_omni",
+          "audio_config": { "num_experts": 4, "num_experts_per_tok": 1 },
+          "vision_config": { "num_experts": 2, "num_experts_per_tok": 1 },
+          "thinker_config": {
+            "text_config": { "num_hidden_layers": 40, "num_experts": 128, "num_experts_per_tok": 8 }
+          }
+        }
+        """)
+
+        XCTAssertEqual(p.numExperts, 128, "the encoders' counts must be ignored entirely")
+        XCTAssertEqual(p.numActiveExperts, 8)
+    }
+
+    /// A container that declares a total but no per-token count inherits the nearest
+    /// ancestor's, which is how wrappers that hoist num_experts_per_tok are written.
+    func testActiveCountInheritedFromAncestor() throws {
+        let p = try profile(config: """
+        {
+          "model_type": "wrapper_moe",
+          "num_experts_per_tok": 8,
+          "text_config": { "num_hidden_layers": 40, "num_experts": 128 }
+        }
+        """)
+
+        XCTAssertEqual(p.numExperts, 128)
+        XCTAssertEqual(p.numActiveExperts, 8, "inherited from the top level")
     }
 
     // MARK: Fallback + negative cases

@@ -279,7 +279,13 @@ enum ModelProfiler {
             return nil
         }
 
-        guard let config = try? JSONDecoder().decode(ModelConfig.self, from: configData) else {
+        let config: ModelConfig
+        do {
+            config = try JSONDecoder().decode(ModelConfig.self, from: configData)
+        } catch {
+            // Silence here meant a profile of nil with no explanation, on the very code
+            // path whose original bug (#112) was a diagnosability failure.
+            print("[ModelProfiler] Could not parse \(configURL.path): \(error)")
             return nil
         }
 
@@ -305,8 +311,11 @@ enum ModelProfiler {
         // An explicit count is authoritative in both directions: a config that says it
         // has one expert is dense, whatever its model_type is called. The model_type
         // heuristic applies only when no known key was present at all.
-        let numExperts = config.numExperts
-        let numActiveExperts = config.activeExperts
+        let rawConfig = (try? JSONSerialization.jsonObject(with: configData)) as? [String: Any]
+        let expertCounts: (total: Int?, active: Int?) =
+            rawConfig.map { findExpertCounts(in: $0) } ?? (total: nil, active: nil)
+        let numExperts = expertCounts.total
+        let numActiveExperts = expertCounts.active
         let modelType = config.modelType ?? "unknown"
         let isMoE = numExperts.map { $0 > 1 } ?? modelTypeImpliesMoE(modelType)
 
@@ -329,6 +338,64 @@ enum ModelProfiler {
             weightFileSizeBytes: weightSize,
             modelId: modelId
         )
+    }
+
+    /// Routed-expert count keys, in precedence order within a container.
+    private static let expertTotalKeys = ["num_local_experts", "num_experts", "n_routed_experts"]
+
+    /// Sub-config containers that hold a language model, tried before other children so
+    /// the result does not depend on dictionary iteration order. Qwen3-Omni carries a
+    /// count under both `talker_config` and `thinker_config` with *different* active
+    /// counts, so an unordered walk would report a different number run to run.
+    private static let languageContainerPriority = [
+        "text_config", "thinker_config", "language_config", "llm_config", "decoder_config",
+    ]
+
+    /// Finds the routed-expert count by walking nested containers breadth-first.
+    ///
+    /// Multimodal wrappers nest the language model at varying depths and under varying
+    /// names — `text_config` (Qwen3.5-VL), `language_config` (DeepSeek-VL2, whose
+    /// model_type contains no "moe" so nothing else would catch it), and
+    /// `thinker_config.text_config` two levels down (Qwen3-Omni). Breadth-first keeps an
+    /// outer explicit count authoritative over one nested deeper, and non-positive
+    /// values are skipped as placeholders (issue #112 and its review follow-ups).
+    static func findExpertCounts(in root: [String: Any], maxDepth: Int = 3)
+        -> (total: Int?, active: Int?)
+    {
+        var level = [root]
+        var depth = 0
+        while !level.isEmpty && depth <= maxDepth {
+            for container in level {
+                for key in expertTotalKeys {
+                    guard let total = intValue(container[key]), total > 0 else { continue }
+                    // Pair the active count with the container the total came from.
+                    let active = intValue(container["num_experts_per_tok"]).flatMap { $0 > 0 ? $0 : nil }
+                    return (total, active)
+                }
+            }
+            var next: [[String: Any]] = []
+            for container in level {
+                let childKeys = container.keys.filter { container[$0] is [String: Any] }
+                let ordered =
+                    languageContainerPriority.filter(childKeys.contains)
+                    + childKeys.filter { !languageContainerPriority.contains($0) }.sorted()
+                for key in ordered {
+                    if let child = container[key] as? [String: Any] { next.append(child) }
+                }
+            }
+            level = next
+            depth += 1
+        }
+        return (nil, nil)
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        switch value {
+        case let v as Int: return v
+        case let v as NSNumber: return v.intValue
+        case let v as String: return Int(v)
+        default: return nil
+        }
     }
 
     /// Last-resort MoE detection for configs whose expert-count key we do not know.

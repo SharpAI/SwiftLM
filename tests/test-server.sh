@@ -12,7 +12,8 @@ set -euo pipefail
 BINARY="${1:-.build/release/SwiftLM}"
 PORT="${2:-15413}"
 HOST="127.0.0.1"
-MODEL="mlx-community/Qwen2.5-0.5B-Instruct-4bit"  # Smallest model for CI
+# Overridable so the same smoke test can cover more than one architecture in CI.
+MODEL="${SWIFTLM_TEST_MODEL:-mlx-community/Qwen2.5-0.5B-Instruct-4bit}"  # Smallest model for CI
 URL="http://${HOST}:${PORT}"
 PASS=0
 FAIL=0

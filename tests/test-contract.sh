@@ -102,6 +102,29 @@ else
     pass "token-straddling stop: prefix withheld, preceding text delivered"
 fi
 
+# ── 2c. Same guarantee on the legacy /v1/completions endpoint ────────────────
+log "Test 2c: /v1/completions does not leak a token-straddling stop sequence"
+COMPLETION=$(curl -sf -N "$URL/v1/completions" -H 'Content-Type: application/json' \
+    -d '{"model":"x","prompt":"Repeat exactly: The quick brown fox jumps over the lazy dog\n","max_tokens":40,"temperature":0,"stream":true,"stop":["own fox"]}' \
+    | python3 -c '
+import json,sys
+out=""
+for line in sys.stdin:
+    line=line.strip()
+    if not line.startswith("data: ") or line=="data: [DONE]": continue
+    try: d=json.loads(line[6:])
+    except Exception: continue
+    for ch in d.get("choices",[]):
+        out += ch.get("text") or ""
+print(out)')
+if echo "$COMPLETION" | grep -q "own"; then
+    fail "/v1/completions leaked a stop prefix: $(echo "$COMPLETION" | head -c 60)"
+elif ! echo "$COMPLETION" | grep -q "The quick br"; then
+    fail "/v1/completions dropped text before the stop: $(echo "$COMPLETION" | head -c 60)"
+else
+    pass "/v1/completions withholds the prefix and delivers preceding text"
+fi
+
 # ── 3. Reasoning must not leak into content ──────────────────────────────────
 # Issue #108: a template that pre-opens <think> left the whole reasoning block in
 # `content`, with a stray closing tag inside it.

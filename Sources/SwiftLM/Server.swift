@@ -2429,6 +2429,10 @@ func handleTextStreaming(
         var fullText = ""
         var stopped = false
         var firstToken = true
+        // Characters already sent, and the tail withheld because it could still open
+        // a stop sequence (#133). Local to this loop; the chat path has its own pair.
+        var emittedTextCount = 0
+        var heldStopTail = ""
         // Unconditional cleanup: guarantees heartbeat is cancelled on ALL exit paths
         // (normal completion, client disconnect, or task cancellation during prefill).
         defer {
@@ -2453,18 +2457,31 @@ func handleTextStreaming(
                 if completionTokenCount % 8 == 0 {
                     try? await Task.sleep(for: .microseconds(50))
                 }
+                // Same treatment as the chat path (#126, #133): a stop sequence spanning
+                // two chunks shows no match on the first, and emitting that chunk hands
+                // the client the very text it asked to be cut. Withhold the ambiguous
+                // tail, and track characters actually released rather than deriving a
+                // position from chunk boundaries — that arithmetic was wrong in both
+                // directions on the chat path before it was replaced.
                 if let (trimmedText, _) = checkStopSequences(fullText, stopSequences: stopSequences) {
-                    let emittedSoFar = fullText.count - text.count
-                    if trimmedText.count > emittedSoFar {
-                        let partialText = String(trimmedText.suffix(trimmedText.count - emittedSoFar))
-                        cont.yield(sseTextChunk(modelId: modelId, text: partialText, finishReason: nil))
+                    let remainder = String(
+                        trimmedText.dropFirst(min(emittedTextCount, trimmedText.count)))
+                    if !remainder.isEmpty {
+                        cont.yield(sseTextChunk(modelId: modelId, text: remainder, finishReason: nil))
                     }
                     cont.yield(sseTextChunk(modelId: modelId, text: "", finishReason: "stop"))
                     cont.yield("data: [DONE]\n\n")
                     cont.finish()
                     stopped = true
                 } else {
-                    cont.yield(sseTextChunk(modelId: modelId, text: text, finishReason: nil))
+                    let candidate = heldStopTail + text
+                    let holdLength = pendingStopPrefixLength(candidate, stopSequences: stopSequences)
+                    let releasable = String(candidate.dropLast(holdLength))
+                    heldStopTail = String(candidate.suffix(holdLength))
+                    if !releasable.isEmpty {
+                        emittedTextCount += releasable.count
+                        cont.yield(sseTextChunk(modelId: modelId, text: releasable, finishReason: nil))
+                    }
                 }
             case .toolCall:
                 break
@@ -2481,11 +2498,21 @@ func handleTextStreaming(
                     case .cancelled, .stop:
                         reason = "stop"
                     }
+                    if !heldStopTail.isEmpty {
+                        cont.yield(sseTextChunk(modelId: modelId, text: heldStopTail, finishReason: nil))
+                        heldStopTail = ""
+                    }
                     cont.yield(sseTextChunk(modelId: modelId, text: "", finishReason: reason))
                     cont.yield("data: [DONE]\n\n")
                     cont.finish()
                 }
             }
+        }
+        // The tail never became a stop sequence, so it is ordinary output. Normally
+        // released above; this covers a stream that ends without an .info event.
+        if !stopped && !heldStopTail.isEmpty {
+            cont.yield(sseTextChunk(modelId: modelId, text: heldStopTail, finishReason: nil))
+            heldStopTail = ""
         }
         cont.finish()
         let duration = Date().timeIntervalSince(genStart)

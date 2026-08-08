@@ -76,7 +76,6 @@ jobs:
     needs: build_and_unit_test
     runs-on: macos-15
     timeout-minutes: 30
-    continue-on-error: ${{ matrix.modality == 'opencode' }}
     strategy:
       fail-fast: false
       matrix:
@@ -107,6 +106,10 @@ jobs:
             models: mlx-community/Qwen2.5-0.5B-Instruct-4bit
           - modality: omni
             models: mlx-community/gemma-4-e4b-it-4bit
+          # No longer continue-on-error: Test 2 used to shell out to the opencode npm
+          # CLI, which the runner OOM-killed after the server had already answered
+          # correctly. It now issues the request shape opencode sends, so a failure here
+          # means SwiftLM misbehaved and should block.
           - modality: opencode
             models: mlx-community/gemma-4-e4b-it-4bit
     steps:

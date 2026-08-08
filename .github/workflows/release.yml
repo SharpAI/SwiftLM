@@ -1,6 +1,18 @@
 name: Release
 
-# Auto-release on every push to main (like llama.cpp)
+# Auto-release after CI passes on main.
+#
+# This used to trigger directly on push, which meant the release built and published
+# concurrently with CI Pipeline and did not depend on it — a red pipeline still shipped a
+# binary. workflow_run defers the release until CI Pipeline has concluded, and the job
+# guard below requires that conclusion to be success.
+#
+# To be clear about what this does not fix: b674 shipped a Gemma 4 regression while CI
+# was green on that commit, because no job loads gemma-4-e2b-it-4bit. Gating stops a
+# release when CI fails; it cannot stop one when CI passes on an untested path.
+#
+# Note CI Pipeline concludes success when only the opencode integration job fails, since
+# that job is continue-on-error — so the known runner OOM there does not block releases.
 on:
   workflow_dispatch:
     inputs:
@@ -8,21 +20,11 @@ on:
         description: 'Create new release'
         required: true
         type: boolean
-  push:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types: [completed]
     branches:
       - main
-    paths:
-      - '**/*.swift'
-      - '**/*.c'
-      - '**/*.cpp'
-      - '**/*.h'
-      - '**/*.hpp'
-      - '**/*.m'
-      - '**/*.mm'
-      - '**/*.metal'
-      - 'Package.swift'
-      - 'Package.resolved'
-      - '.github/workflows/release.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -34,15 +36,44 @@ permissions:
 jobs:
   build-and-release:
     runs-on: macos-15
+    # A manual dispatch always runs; an automatic one only after CI succeeded.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event.workflow_run.conclusion == 'success'
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Full history for build number
           submodules: recursive
+          # Build exactly the commit CI validated. workflow_run would otherwise check out
+          # the branch tip, which may already have moved on to an untested commit.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Install Metal Toolchain
         run: xcodebuild -downloadComponent MetalToolchain || true
+
+      # workflow_run carries no path filter, so the old `paths:` list is enforced here.
+      # Without this a docs-only commit would publish a release, because CI runs on every
+      # push to main. Submodule pointer moves count as source: the mlx-swift-lm bump is
+      # how the Gemma 4 fix reached users.
+      - name: Check for source changes since the last release
+        id: changes
+        run: |
+          LAST_TAG="$(git tag --list 'b[0-9]*' --sort=-creatordate | head -1)"
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous release tag; treating as source change."
+            echo "source=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          CHANGED="$(git diff --name-only "$LAST_TAG"..HEAD || true)"
+          echo "Changed since $LAST_TAG:"; echo "$CHANGED" | head -40
+          if echo "$CHANGED" | grep -qE '\.(swift|c|cpp|h|hpp|m|mm|metal)$|^Package\.(swift|resolved)$|^\.github/workflows/release\.yml$|^mlx-swift(-lm)?$'; then
+            echo "source=true" >> $GITHUB_OUTPUT
+          else
+            echo "No source changes since $LAST_TAG — build will run, publish will be skipped."
+            echo "source=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Determine tag name
         id: tag
@@ -169,7 +200,9 @@ jobs:
           RELEASE_EOF
 
       - name: Create release
-        if: ${{ github.event_name == 'push' || github.event.inputs.create_release == 'true' }}
+        if: >-
+          ${{ (github.event_name == 'workflow_run' && steps.changes.outputs.source == 'true')
+          || github.event.inputs.create_release == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}

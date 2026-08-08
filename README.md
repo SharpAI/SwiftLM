@@ -406,6 +406,24 @@ For a detailed breakdown on repository architecture, upstream synchronization, o
 
 ## 💻 Benchmarks & Testing
 
+### Unit tests
+
+MLX aborts the process when it cannot find its Metal library, so a bare `swift test`
+dies on the first test that touches MLX — leaving almost the whole suite unrun while the
+output still looks like a short, passing run. Install the metallib once after building
+the test bundle:
+
+```bash
+swift build --build-tests
+scripts/install-test-metallib.sh
+swift test
+```
+
+That takes the local run from 1 executed test to ~245. CI does the same step inline, so
+it is unaffected. A single suite can be run with `swift test --filter <SuiteName>`.
+
+### Benchmarks
+
 Run our automated benchmark suites via the interactive script:
 ```bash
 ./run_benchmark.sh

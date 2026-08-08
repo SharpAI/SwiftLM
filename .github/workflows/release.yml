@@ -11,8 +11,10 @@ name: Release
 # was green on that commit, because no job loads gemma-4-e2b-it-4bit. Gating stops a
 # release when CI fails; it cannot stop one when CI passes on an untested path.
 #
-# Note CI Pipeline concludes success when only the opencode integration job fails, since
-# that job is continue-on-error — so the known runner OOM there does not block releases.
+# The opencode job is no longer continue-on-error, so a failure there now flips CI
+# Pipeline to failure and stops the release. That coupling is intentional: the job tests
+# the request shape opencode sends rather than shelling out to its npm CLI, so a failure
+# means SwiftLM misbehaved.
 on:
   workflow_dispatch:
     inputs:

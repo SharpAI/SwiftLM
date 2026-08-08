@@ -117,48 +117,109 @@ else
     fail "OpenAI SDK rejected the stream (likely invalid SSE structure or unknown events)"
 fi
 
-# ── Test 2: opencode CLI end-to-end ────────────────────────────────
-log "Test 2: OpenCode CLI (opencode-ai) end-to-end compatibility"
+# ── Test 2: opencode-shaped agent request ──────────────────────────
+# Previously this installed opencode-ai from npm and ran the CLI, which the CI runner
+# OOM-kills (`Killed: 9`) after the server has already answered correctly — a red job
+# that says nothing about SwiftLM. What is worth testing is the request shape opencode
+# sends: a system prompt, a tool catalogue, and a streamed response whose tool-call
+# deltas a strict client can reassemble. That is exercised directly here, with no npm.
+log "Test 2: opencode-shaped agent request (streaming + tools)"
 
-log "Installing opencode-ai in isolated directory..."
-mkdir -p /tmp/opencode_cli_test
-cd /tmp/opencode_cli_test
-npm install opencode-ai@latest --silent >/dev/null 2>&1
+cat << 'PYEOF' > /tmp/opencode_agent_test.py
+import json, os, sys
+import openai
 
-log "Running opencode CLI against SwiftLM server..."
-# We use openai/gpt-4o-mini so the CLI validation passes. SwiftLM ignores the requested model and serves Gemma-4.
-# We pipe 'yes' to handle any standard input confirmation OpenCode asks for, and use --dangerously-skip-permissions
-# Capture exit code separately — do NOT use || true, we need the real exit status.
+client = openai.OpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key="sk-test", max_retries=0)
+
+# The shape opencode sends: a coding-agent system prompt plus its tool catalogue.
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "bash",
+        "description": "Execute a shell command",
+        "parameters": {"type": "object",
+                       "properties": {"command": {"type": "string"}},
+                       "required": ["command"]}}},
+    {"type": "function", "function": {
+        "name": "read",
+        "description": "Read a file from disk",
+        "parameters": {"type": "object",
+                       "properties": {"path": {"type": "string"}},
+                       "required": ["path"]}}},
+]
+MESSAGES = [
+    {"role": "system", "content": "You are a coding agent. Use the provided tools when helpful."},
+    {"role": "user", "content": "List the files in the current directory."},
+]
+
+try:
+    stream = client.chat.completions.create(
+        model=os.environ["MODEL"], messages=MESSAGES, tools=TOOLS,
+        stream=True, max_tokens=200, temperature=0,
+        # opencode's networking layer injects this into every streaming request. It makes
+        # SwiftLM append a terminal chunk with an empty `choices` array, which is exactly
+        # the shape a strict SSE client can trip on — and which no SDK-based test covered.
+        stream_options={"include_usage": True},
+    )
+except Exception as e:
+    print(f"Error: request rejected: {e}")
+    sys.exit(1)
+
+# Reassemble exactly as a strict client does: tool-call deltas are keyed by index.
+calls, chunks, finish = {}, 0, None
+try:
+    for chunk in stream:
+        chunks += 1
+        for choice in chunk.choices:
+            if choice.finish_reason:
+                finish = choice.finish_reason
+            for tc in (choice.delta.tool_calls or []):
+                if tc.index is None:
+                    print("Error: tool_call delta has no index — cannot be reassembled")
+                    sys.exit(1)
+                slot = calls.setdefault(tc.index, {"name": "", "args": ""})
+                if tc.function and tc.function.name:
+                    slot["name"] += tc.function.name
+                if tc.function and tc.function.arguments:
+                    slot["args"] += tc.function.arguments
+except Exception as e:
+    print(f"Error: SSE stream failed to parse: {e}")
+    sys.exit(1)
+
+if chunks == 0:
+    print("Error: stream produced no chunks")
+    sys.exit(1)
+if finish is None:
+    print("Error: stream never reported a finish_reason")
+    sys.exit(1)
+
+for index, call in calls.items():
+    if not call["name"]:
+        print(f"Error: tool call {index} has no function name")
+        sys.exit(1)
+    try:
+        json.loads(call["args"] or "{}")
+    except json.JSONDecodeError as e:
+        print(f"Error: tool call {call['name']} arguments are not valid JSON: {e}")
+        sys.exit(1)
+
+if not calls:
+    # Not a failure: whether the model chooses a tool is its business, and hard-failing
+    # would make this job flaky. But say so loudly, otherwise the test can quietly go
+    # vacuous — green forever while the reassembly path stops being exercised.
+    print("WARNING: no tool call emitted — the tool-call reassembly path was NOT exercised")
+
+print(f"Success: {chunks} chunks, finish_reason={finish}, tool_calls={len(calls)}")
+PYEOF
+
 set +e
-yes | npx --yes opencode run "Say 'I am ready'." \
-    --model openai/gpt-4o-mini \
-    --pure \
-    --dangerously-skip-permissions \
-    > /tmp/opencode_cli.log 2>&1
-OPENCODE_EXIT=$?
+AGENT_OUT=$("$VENV_DIR/bin/python" /tmp/opencode_agent_test.py 2>&1)
+AGENT_EXIT=$?
 set -e
 
-OPENCODE_LOG=$(cat /tmp/opencode_cli.log 2>/dev/null || true)
-
-if [ $OPENCODE_EXIT -ne 0 ]; then
-    # Check if it's a known transient failure we can accept (e.g. model list refresh)
-    if echo "$OPENCODE_LOG" | grep -qi "parse error" || echo "$OPENCODE_LOG" | grep -qi "Unexpected token"; then
-        fail "OpenCode CLI crashed while parsing the SSE stream (streaming protocol error)"
-        echo "--- opencode output ---"
-        echo "$OPENCODE_LOG"
-    else
-        # Non-zero exit but not a streaming parse error — acceptable for a dev agent
-        # (e.g. it may exit non-zero after a successful generation if no tool was called)
-        if ! echo "$OPENCODE_LOG" | grep -qi "Model not found" && [ -n "$OPENCODE_LOG" ]; then
-            pass "OpenCode CLI completed (exit $OPENCODE_EXIT) — no SSE parse errors detected"
-        else
-            fail "OpenCode CLI failed with exit $OPENCODE_EXIT"
-            echo "--- opencode output ---"
-            echo "$OPENCODE_LOG"
-        fi
-    fi
+if [ $AGENT_EXIT -eq 0 ]; then
+    pass "opencode-shaped request handled — $AGENT_OUT"
 else
-    pass "OpenCode CLI exited cleanly (exit 0) — stream parsed successfully"
+    fail "opencode-shaped request failed: $AGENT_OUT"
 fi
 
 # ── Results ──────────────────────────────────────────────────────────

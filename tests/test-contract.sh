@@ -74,6 +74,30 @@ else
     pass "stop sequence absent from assembled stream"
 fi
 
+# ── 2b. A stop sequence that cannot be a single token ────────────────────────
+# "own fox" spans a token boundary by construction, so this exercises the straddling
+# path specifically: before #126 was fixed, the client received "The quick brown".
+log "Test 2b: stop sequence spanning a token boundary is not leaked"
+PROMPT="Repeat this exactly: The quick brown fox jumps over the lazy dog"
+STRADDLE=$(curl -sf -N "$URL/v1/chat/completions" -H 'Content-Type: application/json' \
+    -d "{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}],\"max_tokens\":40,\"temperature\":0,\"stream\":true,\"stop\":[\"own fox\"]}" \
+    | python3 -c '
+import json,sys
+out=""
+for line in sys.stdin:
+    line=line.strip()
+    if not line.startswith("data: ") or line=="data: [DONE]": continue
+    try: d=json.loads(line[6:])
+    except Exception: continue
+    for ch in d.get("choices",[]):
+        out += ch.get("delta",{}).get("content") or ""
+print(out)')
+if echo "$STRADDLE" | grep -q "own"; then
+    fail "a prefix of the stop sequence leaked: $(echo "$STRADDLE" | head -c 60)"
+else
+    pass "no prefix of a token-straddling stop sequence reached the client"
+fi
+
 # ── 3. Reasoning must not leak into content ──────────────────────────────────
 # Issue #108: a template that pre-opens <think> left the whole reasoning block in
 # `content`, with a stray closing tag inside it.

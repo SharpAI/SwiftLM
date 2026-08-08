@@ -155,6 +155,10 @@ try:
     stream = client.chat.completions.create(
         model=os.environ["MODEL"], messages=MESSAGES, tools=TOOLS,
         stream=True, max_tokens=200, temperature=0,
+        # opencode's networking layer injects this into every streaming request. It makes
+        # SwiftLM append a terminal chunk with an empty `choices` array, which is exactly
+        # the shape a strict SSE client can trip on — and which no SDK-based test covered.
+        stream_options={"include_usage": True},
     )
 except Exception as e:
     print(f"Error: request rejected: {e}")
@@ -197,6 +201,12 @@ for index, call in calls.items():
     except json.JSONDecodeError as e:
         print(f"Error: tool call {call['name']} arguments are not valid JSON: {e}")
         sys.exit(1)
+
+if not calls:
+    # Not a failure: whether the model chooses a tool is its business, and hard-failing
+    # would make this job flaky. But say so loudly, otherwise the test can quietly go
+    # vacuous — green forever while the reassembly path stops being exercised.
+    print("WARNING: no tool call emitted — the tool-call reassembly path was NOT exercised")
 
 print(f"Success: {chunks} chunks, finish_reason={finish}, tool_calls={len(calls)}")
 PYEOF

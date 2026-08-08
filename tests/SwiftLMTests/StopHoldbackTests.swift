@@ -34,7 +34,7 @@ final class StopHoldbackTests: XCTestCase {
     func testLongestAmbiguityWins() {
         let overlapping = ["<|end|>", "<|endoftext|>"]
         XCTAssertEqual(pendingStopPrefixLength("x<|end", stopSequences: overlapping), 5)
-        // "<|end|" cannot complete "<|end|>"… it can: it is a proper prefix of length 6.
+        // "<|end|" is a proper prefix of "<|end|>" (length 6), so it is still ambiguous.
         XCTAssertEqual(pendingStopPrefixLength("x<|end|", stopSequences: overlapping), 6)
     }
 
@@ -43,9 +43,15 @@ final class StopHoldbackTests: XCTestCase {
         XCTAssertEqual(pendingStopPrefixLength("anything", stopSequences: [""]), 0)
     }
 
-    /// Multi-byte content must not be split mid-character; the count is in characters.
-    func testUnicodeTailIsCountedInCharacters() {
-        XCTAssertEqual(pendingStopPrefixLength("東京です", stopSequences: stops), 0)
+    /// The count is in grapheme clusters, so a multi-scalar cluster counts as one and is
+    /// never split. The earlier version of this test used only multi-*byte* characters,
+    /// each of which is a single scalar — it could not have caught a scalar/cluster mixup.
+    func testCountIsInGraphemeClustersNotScalars() {
+        let family = "👨‍👩‍👧"  // one cluster, several scalars joined by ZWJ
+        XCTAssertEqual(family.count, 1, "precondition: the fixture is a single cluster")
+        XCTAssertEqual(pendingStopPrefixLength(family, stopSequences: stops), 0)
+        XCTAssertEqual(pendingStopPrefixLength(family + "\nUser", stopSequences: stops), 5,
+                       "the held tail is measured in clusters, unaffected by the emoji's scalars")
         XCTAssertEqual(pendingStopPrefixLength("東京です\nUser", stopSequences: stops), 5)
     }
 

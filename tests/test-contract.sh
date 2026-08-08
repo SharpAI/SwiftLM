@@ -92,10 +92,14 @@ for line in sys.stdin:
     for ch in d.get("choices",[]):
         out += ch.get("delta",{}).get("content") or ""
 print(out)')
+# Absence alone would also pass if the fix over-withheld and dropped the tail, so assert
+# the expected prefix actually arrived too.
 if echo "$STRADDLE" | grep -q "own"; then
     fail "a prefix of the stop sequence leaked: $(echo "$STRADDLE" | head -c 60)"
+elif ! echo "$STRADDLE" | grep -q "The quick br"; then
+    fail "text before the stop was dropped — got: $(echo "$STRADDLE" | head -c 60)"
 else
-    pass "no prefix of a token-straddling stop sequence reached the client"
+    pass "token-straddling stop: prefix withheld, preceding text delivered"
 fi
 
 # ── 3. Reasoning must not leak into content ──────────────────────────────────

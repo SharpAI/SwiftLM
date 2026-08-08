@@ -1915,9 +1915,13 @@ func handleChatStreaming(
         var stopped = false
         var firstToken = true
         var tracker = ThinkingStateTracker(startInThinking: enableThinking && thinkingPreOpened)
-        // Raw characters already released downstream, and the tail withheld because it
-        // could still open a stop sequence. Counting what was actually emitted is what
-        // makes the stop path's remainder correct regardless of chunk boundaries.
+        // Raw characters handed to the thinking tracker — not necessarily characters on
+        // the wire, since the tracker may still be holding a partial tag — plus the tail
+        // withheld because it could still open a stop sequence. Counting consumption
+        // rather than chunk offsets is what makes the stop remainder correct regardless
+        // of where chunk boundaries fall. The count is in grapheme clusters, so the
+        // min() clamp at the stop path guards the rare case where a combining mark
+        // arriving in a later chunk merges with the previous one.
         var emittedTextCount = 0
         var heldStopTail = ""
         // Unconditional cleanup: guarantees heartbeat is cancelled on ALL exit paths
@@ -1987,6 +1991,11 @@ func handleChatStreaming(
                                 finishReason: nil
                             ))
                         }
+                        // Everything accumulated so far has now gone to the client, so
+                        // the stop path must not re-emit it. Counting raw characters
+                        // consumed (not the cleaned derivative that went on the wire)
+                        // keeps this consistent with how the normal path counts.
+                        emittedTextCount = fullText.count
                         jsonBuffering = false
                     }
                     continue  // skip normal emit while buffering or just flushed
@@ -2138,6 +2147,17 @@ func handleChatStreaming(
                         fflush(stdout)
                     }
                 }
+            }
+        }
+        // Safety net: the tail is normally released in `case .info`, but a stream that
+        // ends without one — a generation error, or cancellation mid-decode — would
+        // otherwise discard up to maxStopLength-1 characters of real output.
+        if !stopped && !heldStopTail.isEmpty {
+            let (r, c) = enableThinking ? tracker.process(heldStopTail) : ("", heldStopTail)
+            heldStopTail = ""
+            if !r.isEmpty || !c.isEmpty {
+                cont.yield(sseChunk(modelId: modelId, reasoningContent: r.isEmpty ? nil : r,
+                                    content: c.isEmpty ? nil : c, finishReason: nil))
             }
         }
         cont.finish()

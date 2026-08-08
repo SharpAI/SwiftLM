@@ -1892,6 +1892,15 @@ func handleChatStreaming(
         var stopped = false
         var firstToken = true
         var tracker = ThinkingStateTracker(startInThinking: enableThinking && thinkingPreOpened)
+        // Raw characters handed to the thinking tracker — not necessarily characters on
+        // the wire, since the tracker may still be holding a partial tag — plus the tail
+        // withheld because it could still open a stop sequence. Counting consumption
+        // rather than chunk offsets is what makes the stop remainder correct regardless
+        // of where chunk boundaries fall. The count is in grapheme clusters, so the
+        // min() clamp at the stop path guards the rare case where a combining mark
+        // arriving in a later chunk merges with the previous one.
+        var emittedTextCount = 0
+        var heldStopTail = ""
         // Unconditional cleanup: guarantees heartbeat is cancelled on ALL exit paths
         // (normal completion, client disconnect, or task cancellation during prefill).
         defer {
@@ -1959,6 +1968,11 @@ func handleChatStreaming(
                                 finishReason: nil
                             ))
                         }
+                        // Everything accumulated so far has now gone to the client, so
+                        // the stop path must not re-emit it. Counting raw characters
+                        // consumed (not the cleaned derivative that went on the wire)
+                        // keeps this consistent with how the normal path counts.
+                        emittedTextCount = fullText.count
                         jsonBuffering = false
                     }
                     continue  // skip normal emit while buffering or just flushed
@@ -1972,14 +1986,24 @@ func handleChatStreaming(
                 // anything after it — review finding on #115. The pre-review code had
                 // the opposite bug: its arithmetic assumed everything before this chunk
                 // was already emitted, dropping text the tracker was holding.)
+                //
+                // A stop sequence can also straddle two chunks, in which case this chunk
+                // shows no match and its tail is the opening of one. Emitting that tail
+                // hands the client the very text it asked to be cut (#126), so the
+                // ambiguous suffix is withheld until the next chunk resolves it.
                 let stopHit = checkStopSequences(fullText, stopSequences: stopSequences)
-                let survivingText: String
+                var survivingText: String
                 if let (trimmedFull, _) = stopHit {
-                    let priorCount = fullText.count - text.count
-                    survivingText = String(text.prefix(max(0, trimmedFull.count - priorCount)))
+                    // The stop completed. Everything the client is owed is the part of
+                    // fullText before it, minus what has already gone out.
+                    survivingText = String(trimmedFull.dropFirst(min(emittedTextCount, trimmedFull.count)))
                 } else {
-                    survivingText = text
+                    let candidate = heldStopTail + text
+                    let holdLength = pendingStopPrefixLength(candidate, stopSequences: stopSequences)
+                    survivingText = String(candidate.dropLast(holdLength))
+                    heldStopTail = String(candidate.suffix(holdLength))
                 }
+                emittedTextCount += survivingText.count
 
                 // ── Route text through thinking state machine ──
                 let (reasoningText, contentText) = enableThinking
@@ -2044,6 +2068,17 @@ func handleChatStreaming(
                     case .cancelled, .stop:
                         reason = hasToolCalls ? "tool_calls" : "stop"
                     }
+                    // The withheld tail never became a stop sequence, so it is ordinary
+                    // output and must not be dropped.
+                    if !heldStopTail.isEmpty {
+                        let (r, c) = enableThinking
+                            ? tracker.process(heldStopTail) : ("", heldStopTail)
+                        heldStopTail = ""
+                        if !r.isEmpty || !c.isEmpty {
+                            cont.yield(sseChunk(modelId: modelId, reasoningContent: r.isEmpty ? nil : r,
+                                                content: c.isEmpty ? nil : c, finishReason: nil))
+                        }
+                    }
                     // Drain text the tracker was holding on a partial tag that never
                     // completed, otherwise the tail of the response is dropped (#108).
                     if enableThinking {
@@ -2089,6 +2124,17 @@ func handleChatStreaming(
                         fflush(stdout)
                     }
                 }
+            }
+        }
+        // Safety net: the tail is normally released in `case .info`, but a stream that
+        // ends without one — a generation error, or cancellation mid-decode — would
+        // otherwise discard up to maxStopLength-1 characters of real output.
+        if !stopped && !heldStopTail.isEmpty {
+            let (r, c) = enableThinking ? tracker.process(heldStopTail) : ("", heldStopTail)
+            heldStopTail = ""
+            if !r.isEmpty || !c.isEmpty {
+                cont.yield(sseChunk(modelId: modelId, reasoningContent: r.isEmpty ? nil : r,
+                                    content: c.isEmpty ? nil : c, finishReason: nil))
             }
         }
         cont.finish()
@@ -2613,6 +2659,33 @@ struct ApiKeyMiddleware<Context: RequestContext>: RouterMiddleware {
 }
 
 // ── Stop Sequence Detection ──────────────────────────────────────────────────
+
+/// How many trailing characters of `text` must be withheld because they could still turn
+/// out to be the opening of a stop sequence.
+///
+/// The stop check only ever fires on the chunk that *completes* a stop sequence, so a
+/// stop split across two chunks had its first part streamed before the match was visible:
+/// `stop: ["\nUser:"]` arriving as `"\nUser"` then `":"` sent `"\nUser"` to the client —
+/// the exact text the client asked to be cut (#126). Withholding the ambiguous tail until
+/// the next chunk resolves it closes that window, at the cost of one chunk of latency on
+/// the tail. This mirrors ThinkingStateTracker's partial-tag handling.
+///
+/// Returns 0 when nothing is ambiguous, so the common case emits immediately.
+func pendingStopPrefixLength(_ text: String, stopSequences: [String]) -> Int {
+    var longest = 0
+    for stop in stopSequences where !stop.isEmpty {
+        // Only *proper* prefixes matter: a complete match is the stop check's job.
+        let maxLength = min(text.count, stop.count - 1)
+        guard maxLength > 0 else { continue }
+        for length in stride(from: maxLength, through: 1, by: -1) where length > longest {
+            if text.hasSuffix(String(stop.prefix(length))) {
+                longest = length
+                break
+            }
+        }
+    }
+    return longest
+}
 
 /// Trims `text` at the earliest stop sequence it contains.
 ///

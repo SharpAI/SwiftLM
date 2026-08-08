@@ -194,6 +194,22 @@ else
     skip "model did not produce complete JSON (capability, not contract)"
 fi
 
+# ── 7. A second, independent SSE parser ──────────────────────────────────────
+# Everything above goes through Python httpx. SwiftLM frames SSE with \r\n\r\n rather
+# than the spec's \n\n; httpx tolerates that, and whether a different parser does is
+# what this establishes (#134). Node is preinstalled on the runner and this needs no
+# npm install, so it costs nothing — unlike the opencode CLI it partially replaces.
+log "Test 7: SSE stream parsed by a non-Python client (Node)"
+if command -v node >/dev/null 2>&1; then
+    if node "$(dirname "$0")/test-sse-node.js" "$URL" "x"; then
+        pass "Node client parsed the stream"
+    else
+        fail "Node client rejected the stream — see output above"
+    fi
+else
+    skip "node not available on this machine"
+fi
+
 log "═══════════════════════════════════════"
 log "Results: $PASS passed, $FAIL failed, $SKIP skipped, $TOTAL total"
 log "═══════════════════════════════════════"

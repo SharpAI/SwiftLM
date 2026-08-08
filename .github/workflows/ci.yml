@@ -100,6 +100,11 @@ jobs:
             models: mlx-community/gemma-4-e4b-it-4bit
           - modality: graph
             models: ""
+          # OpenAI-compatibility contract: what the client receives over the wire, once
+          # real tokenisation decides chunk boundaries. Runs on the smallest model —
+          # these assert server behaviour, not model quality (issue #128).
+          - modality: contract
+            models: mlx-community/Qwen2.5-0.5B-Instruct-4bit
           - modality: omni
             models: mlx-community/gemma-4-e4b-it-4bit
           - modality: opencode

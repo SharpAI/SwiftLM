@@ -2637,14 +2637,22 @@ struct ApiKeyMiddleware<Context: RequestContext>: RouterMiddleware {
 
 // ── Stop Sequence Detection ──────────────────────────────────────────────────
 
+/// Trims `text` at the earliest stop sequence it contains.
+///
+/// Earliest *in the text*, not first in the caller's list: returning whichever entry
+/// happened to be listed first kept everything between the real stop and that one, so
+/// `stop: ["\nUser:", "X"]` against `"abXc\nUser:"` streamed `"abXc"` when the client
+/// had asked to stop at `X` (#126).
 func checkStopSequences(_ text: String, stopSequences: [String]) -> (String, String)? {
-    for stop in stopSequences {
-        if let range = text.range(of: stop) {
-            let trimmed = String(text[text.startIndex..<range.lowerBound])
-            return (trimmed, stop)
+    var earliest: (index: String.Index, stop: String)?
+    for stop in stopSequences where !stop.isEmpty {
+        guard let range = text.range(of: stop) else { continue }
+        if earliest == nil || range.lowerBound < earliest!.index {
+            earliest = (range.lowerBound, stop)
         }
     }
-    return nil
+    guard let earliest else { return nil }
+    return (String(text[text.startIndex..<earliest.index]), earliest.stop)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

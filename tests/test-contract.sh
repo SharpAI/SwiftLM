@@ -210,6 +210,37 @@ else
     skip "node not available on this machine"
 fi
 
+# ── 8. A prompt long enough to be prefilled in chunks ────────────────────────
+# Below prefillStepSize (512 tokens) the generator's prepare() returns the prompt
+# tokens without ever forwarding them, so a whole code path — chunked prefill —
+# goes unexercised. Every other prompt in this repo's tests is under 80 characters,
+# which is how a dual-model MTP crash on any real-sized prompt reached a merge
+# queue with green CI (SharpAI/mlx-swift-lm#46). This closes the gap for the
+# ordinary generate path only — CI runs no --mtp job, so the speculative variant
+# of the same path stays uncovered until one exists (#128).
+log "Test 8: prompt exceeding the prefill chunk size"
+LONG_PROMPT=$(python3 -c '
+# ~3000 tokens: comfortably past 512 even with an efficient tokenizer.
+print(("The quick brown fox jumps over the lazy dog near the river bank. " * 190) + "Reply with the single word: done.")')
+LONG_BODY=$(python3 -c '
+import json, sys
+print(json.dumps({"messages": [{"role": "user", "content": sys.argv[1]}],
+                  "max_tokens": 16, "stream": False}))' "$LONG_PROMPT")
+LONG_RESP=$(curl -sf --max-time 300 "$URL/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d "$LONG_BODY" 2>/dev/null || true)
+if [ -z "$LONG_RESP" ]; then
+    # A crash in the prefill path kills the connection rather than returning an error
+    # body, so an empty response is the signal we are actually looking for here.
+    fail "no response to a chunk-prefilled prompt — server may have died; see /tmp/SwiftLM-test-contract.log"
+elif echo "$LONG_RESP" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+sys.exit(0 if d["choices"][0]["message"]["content"].strip() else 1)' 2>/dev/null; then
+    pass "chunk-prefilled prompt produced content"
+else
+    fail "chunk-prefilled prompt returned no content: $(echo "$LONG_RESP" | head -c 120)"
+fi
+
 log "═══════════════════════════════════════"
 log "Results: $PASS passed, $FAIL failed, $SKIP skipped, $TOTAL total"
 log "═══════════════════════════════════════"

@@ -286,6 +286,9 @@ struct MLXServer: AsyncParsableCommand {
     @Option(name: .long, help: "Number of MTP tokens to generate per speculation round (default: 3)")
     var numMtpTokens: Int = 3
 
+    @Option(name: .long, help: "Assistant checkpoint providing MTP heads, for model families that ship them separately instead of in the main checkpoint (Gemma 4). Ignored when the main model carries its own MTP heads (Qwen3.5, DeepSeek V4).")
+    var mtpAssistantModel: String?
+
     mutating func run() async throws {
         // Raise the open-file limit: large sharded models (e.g. Kimi K2.5, 182 safetensor
         // shards) + draft model + metallib + dylibs can exhaust the default macOS FD limit of 256.
@@ -683,6 +686,47 @@ struct MLXServer: AsyncParsableCommand {
             draftModelRef = nil
         }
 
+        // ── Load the MTP assistant, for families that ship MTP heads separately ──
+        // Qwen3.5 and DeepSeek V4 carry their MTP heads inside the main checkpoint and
+        // conform to MTPLanguageModel directly, so generateMTP already works for them.
+        // Gemma 4 does not: Google ships the heads as a separate assistant checkpoint,
+        // and Gemma4AssistantModel conforms to DualModelMTP — MTPLanguageModel plus a
+        // back-reference to the trunk it drafts for. Loading it here and injecting that
+        // reference is what makes --mtp mean anything for Gemma 4; without it the flag
+        // is silently a no-op, because the main model fails the MTPLanguageModel test.
+        var mtpAssistantModelRef: (any DualModelMTP)? = nil
+        if self.mtp, let assistantPath = self.mtpAssistantModel {
+            print("[SwiftLM] Loading MTP assistant: \(assistantPath)")
+            var assistantConfig: ModelConfiguration
+            if FileManager.default.fileExists(atPath: assistantPath) {
+                assistantConfig = ModelConfiguration(directory: URL(filePath: assistantPath))
+            } else if let local = ModelStorage.validatedContentDirectory(for: assistantPath) {
+                assistantConfig = ModelConfiguration(directory: local)
+            } else {
+                assistantConfig = ModelConfiguration(id: assistantPath)
+            }
+            if self.streamExperts { assistantConfig.lazyLoad = true }
+            let assistantDownloader = HubDownloader(hub: HubApi(downloadBase: cacheRoot))
+            let assistantContainer = try await LLMModelFactory.shared.loadContainer(
+                from: assistantDownloader,
+                using: TransformersTokenizerLoader(),
+                configuration: assistantConfig
+            ) { _ in }
+            mtpAssistantModelRef = await assistantContainer.perform { assistantContext in
+                assistantContext.model as? (any DualModelMTP)
+            }
+            if mtpAssistantModelRef == nil {
+                print("[SwiftLM] ⚠️  \(assistantPath) does not provide MTP heads (not a DualModelMTP).")
+                print("[SwiftLM]    Ignoring --mtp-assistant-model; generation will not use MTP.")
+            } else {
+                // The assistant drafts *for* this trunk, so it needs a reference to it.
+                await container.perform { mainContext in
+                    mtpAssistantModelRef?.mainModelRef = mainContext.model
+                }
+                print("[SwiftLM] MTP assistant ready (\(self.numMtpTokens) tokens/round)")
+            }
+        }
+
         // ── Load DFlash draft model for block-diffusion speculative decoding ──
         let dflashModel: DFlashDraftModel?
         let dflashBlockSizeConfig = self.dflashBlockSize
@@ -810,7 +854,8 @@ struct MLXServer: AsyncParsableCommand {
             prefillSize: self.prefillSize,
             turboKV: self.turboKV,
             mtp: self.mtp,
-            numMtpTokens: self.numMtpTokens
+            numMtpTokens: self.numMtpTokens,
+            mtpAssistantModel: self.mtpAssistantModel
         )
 
         let parallelSlots = self.parallel
@@ -920,7 +965,8 @@ struct MLXServer: AsyncParsableCommand {
                     request: request, bodyData: bodyData, config: config, container: container, semaphore: semaphore, stats: stats, promptCache: promptCache,
                     draftModelRef: draftModelRef, numDraftTokens: numDraftTokensConfig,
                     dflashModel: dflashModel, dflashBlockSize: dflashBlockSizeConfig,
-                    dflashTargetModel: dflashTargetModel
+                    dflashTargetModel: dflashTargetModel,
+                    mtpAssistant: mtpAssistantModelRef
                 )
             } catch {
                 let errMsg = String(describing: error).replacingOccurrences(of: "\"", with: "'")
@@ -1091,6 +1137,7 @@ struct ServerConfig: Sendable {
     let turboKV: Bool
     let mtp: Bool
     let numMtpTokens: Int
+    let mtpAssistantModel: String?
 }
 
 // ── SSD Memory Budget ────────────────────────────────────────────────────────
@@ -1352,7 +1399,8 @@ func handleChatCompletion(
     numDraftTokens: Int = 4,
     dflashModel: DFlashDraftModel? = nil,
     dflashBlockSize: Int? = nil,
-    dflashTargetModel: (any DFlashTargetModel)? = nil
+    dflashTargetModel: (any DFlashTargetModel)? = nil,
+    mtpAssistant: (any DualModelMTP)? = nil
 ) async throws -> Response {
     let chatReq = try JSONDecoder().decode(ChatCompletionRequest.self, from: bodyData)
     let isStream = chatReq.stream ?? false
@@ -1626,9 +1674,9 @@ func handleChatCompletion(
             }
             let remainingTokens = lmInput.text.tokens[startIndex...]
             let trimmedInput = LMInput(tokens: remainingTokens)
-            if config.mtp, context.model is any MTPLanguageModel {
+            if config.mtp, let mtpCtx = mtpContext(main: context, assistant: mtpAssistant) {
                 stream = try MLXLMCommon.generateMTP(
-                    input: trimmedInput, cache: cache, parameters: params, context: context, numMTPTokens: config.numMtpTokens
+                    input: trimmedInput, cache: cache, parameters: params, context: mtpCtx, numMTPTokens: config.numMtpTokens
                 )
             } else {
                 stream = try MLXLMCommon.generate(
@@ -1637,9 +1685,9 @@ func handleChatCompletion(
             }
         } else {
             // Cache miss: process the full prompt.
-            if config.mtp, context.model is any MTPLanguageModel {
+            if config.mtp, let mtpCtx = mtpContext(main: context, assistant: mtpAssistant) {
                 stream = try MLXLMCommon.generateMTP(
-                    input: lmInput, cache: cache, parameters: params, context: context, numMTPTokens: config.numMtpTokens
+                    input: lmInput, cache: cache, parameters: params, context: mtpCtx, numMTPTokens: config.numMtpTokens
                 )
             } else {
                 stream = try MLXLMCommon.generate(
@@ -2712,6 +2760,29 @@ func pendingStopPrefixLength(_ text: String, stopSequences: [String]) -> Int {
         }
     }
     return longest
+}
+
+/// The context `generateMTP` should run against, and whether MTP applies at all.
+///
+/// Two shapes exist. Qwen3.5 and DeepSeek V4 carry MTP heads inside the main checkpoint,
+/// so the main context is already an `MTPLanguageModel` and is used as-is. Gemma 4 ships
+/// the heads as a separate assistant checkpoint: there the *assistant* is the
+/// `MTPLanguageModel`, so it is swapped into a derived context while the tokenizer,
+/// processor and configuration — and the KV cache passed alongside — stay the trunk's.
+/// That mirrors the reference usage in Gemma4MTPBench, which passes the assistant as the
+/// model and the main model's cache.
+///
+/// Returns nil when MTP does not apply, so callers fall through to plain generation.
+func mtpContext(main: ModelContext, assistant: (any DualModelMTP)?) -> ModelContext? {
+    if let assistant, let assistantModel = assistant as? (any LanguageModel) {
+        return ModelContext(
+            configuration: main.configuration,
+            model: assistantModel,
+            processor: main.processor,
+            tokenizer: main.tokenizer
+        )
+    }
+    return main.model is any MTPLanguageModel ? main : nil
 }
 
 /// Trims `text` at the earliest stop sequence it contains.

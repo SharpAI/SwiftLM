@@ -30,12 +30,24 @@ has_partial_files() {
 }
 
 download_one() {
-    local repo="$1"
+    local spec="$1"
+    # `repo@revision` pins to an immutable commit. Upstream repositories are mutable:
+    # LiquidAI republished LFM2.5-VL-450M-MLX-4bit with a malformed chat template
+    # (`{- bos_token -}}`, one brace short), which turned every request into an HTTP 500
+    # and took main red with no change on our side. A floating tag means CI results
+    # depend on what a third party did that afternoon.
+    local repo="${spec%@*}"
+    local revision=""
+    if [ "$spec" != "$repo" ]; then
+        revision="${spec##*@}"
+    fi
     local dir="$HUB_DIR/models--${repo//\//--}"
+    local rev_args=()
+    [ -n "$revision" ] && rev_args=(--revision "$revision")
 
     for attempt in $(seq 1 "$ATTEMPTS"); do
-        echo "--- $repo (attempt $attempt/$ATTEMPTS, per-request timeout ${HF_HUB_DOWNLOAD_TIMEOUT}s)"
-        if hf download "$repo"; then
+        echo "--- $repo${revision:+ @ $revision} (attempt $attempt/$ATTEMPTS, per-request timeout ${HF_HUB_DOWNLOAD_TIMEOUT}s)"
+        if hf download "$repo" "${rev_args[@]}"; then
             if has_partial_files "$dir"; then
                 echo "::warning::$repo downloaded but .incomplete files remain; retrying"
             else

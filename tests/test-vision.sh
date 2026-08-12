@@ -89,8 +89,37 @@ mkdir -p /tmp/vision_test
 # 28x28 black PNG (requires multiple of 28 for Qwen2-VL patch embedder)
 BASE64_IMG="iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAIAAAD9b0jDAAAAGUlEQVR4nO3BMQEAAADCoPVPbQdvoAAA6DQJTAABRMAOLAAAAABJRU5ErkJggg=="
 
+# A model id names a moving target. On 2026-08-12 LiquidAI republished
+# LFM2.5-VL-450M-MLX-4bit with a chat template one brace short of valid —
+# `{- bos_token -}}` where the previous revision had `{{- bos_token -}}` — so every
+# request became `parser('Unexpected token type: closeExpression')`, HTTP 500, and main
+# went red five minutes later with nothing changed on our side. Restoring that single
+# brace locally makes the same revision answer normally, so the fault is upstream, not
+# a compatibility gap worth chasing here.
+#
+# Pinning is what stops a third party's afternoon from deciding whether this repository
+# has a green build. Re-point it deliberately, when someone means to test a newer
+# revision, and treat the failure that follows as a real result.
+LFM_REPO="LiquidAI/LFM2.5-VL-450M-MLX-4bit"
+LFM_REVISION="10ce3604e42cd595497c47aaf67b7890e1e2a3b4"
+
+# Resolve to the pinned snapshot on disk. Falling back to the bare repo id keeps a local
+# `./tests/test-vision.sh` working without a prefetch, but says so — a run that quietly
+# tested a different revision than CI did is worse than one that took a moment longer.
+pinned_snapshot() {
+    local repo="$1" revision="$2"
+    local hub="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
+    local dir="$hub/models--${repo//\//--}/snapshots/$revision"
+    if [ -d "$dir" ]; then
+        echo "$dir"
+    else
+        log "note: pinned revision ${revision:0:7} of $repo is not in the cache; using the floating id"
+        echo "$repo"
+    fi
+}
+
 run_case "mlx-community/Qwen2-VL-2B-Instruct-4bit" "$BASE_PORT" "yes"
-run_case "LiquidAI/LFM2.5-VL-450M-MLX-4bit" "$((BASE_PORT + 1))" "yes"
+run_case "$(pinned_snapshot "$LFM_REPO" "$LFM_REVISION")" "$((BASE_PORT + 1))" "yes"
 
 rm -rf /tmp/vision_test
 exit 0

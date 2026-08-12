@@ -42,12 +42,14 @@ download_one() {
         revision="${spec##*@}"
     fi
     local dir="$HUB_DIR/models--${repo//\//--}"
-    local rev_args=()
-    [ -n "$revision" ] && rev_args=(--revision "$revision")
 
     for attempt in $(seq 1 "$ATTEMPTS"); do
         echo "--- $repo${revision:+ @ $revision} (attempt $attempt/$ATTEMPTS, per-request timeout ${HF_HUB_DOWNLOAD_TIMEOUT}s)"
-        if hf download "$repo" "${rev_args[@]}"; then
+        # Spelled out rather than assembling an args array: the runners are macOS, which
+        # ships bash 3.2, where expanding an empty array under `set -u` is an unbound
+        # variable error rather than nothing at all. That fails every unpinned download.
+        if { [ -n "$revision" ] && hf download "$repo" --revision "$revision"; } \
+            || { [ -z "$revision" ] && hf download "$repo"; }; then
             if has_partial_files "$dir"; then
                 echo "::warning::$repo downloaded but .incomplete files remain; retrying"
             else

@@ -93,8 +93,13 @@ jobs:
             name_suffix: -gemma-e2b
             models: mlx-community/gemma-4-e2b-it-4bit
             test_model: mlx-community/gemma-4-e2b-it-4bit
+          # LFM2.5 used to be absent here and was fetched by the server mid-test, which
+          # is how it silently picked up a republished revision whose chat template was
+          # one brace short of valid and took main red. Prefetching it at a pinned
+          # revision is what makes this job depend on our code rather than on what
+          # upstream published that afternoon.
           - modality: vision
-            models: mlx-community/Qwen2-VL-2B-Instruct-4bit
+            models: mlx-community/Qwen2-VL-2B-Instruct-4bit LiquidAI/LFM2.5-VL-450M-MLX-4bit@10ce3604e42cd595497c47aaf67b7890e1e2a3b4
           - modality: audio
             models: mlx-community/gemma-4-e4b-it-4bit
           - modality: graph

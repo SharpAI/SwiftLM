@@ -1,12 +1,25 @@
 name: Dependency Automation
 
+# Prepares a submodule bump when mlx-swift or mlx-swift-lm cuts a release, and stops
+# at a pushed branch rather than opening a pull request.
+#
+# Opening the PR from a workflow needs a personal access token, because GitHub does
+# not start workflow runs for events raised by GITHUB_TOKEN. A bot-opened PR would
+# therefore arrive with no checks at all — permanently pending, never green — and this
+# repository gates releases on CI concluding successfully (see release.yml). A branch
+# is the honest stopping point: opening the PR yourself takes one click, and CI then
+# runs normally because the event is yours.
+#
+# That a human sees the bump before it merges is a feature. Bumps here have needed a
+# pointer check, an umbrella build and a smoke test to be trustworthy; the automation
+# does the mechanical part and leaves the judgement.
+
 on:
   repository_dispatch:
     types: [dependency_bump]
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   bump-dependencies:
@@ -18,34 +31,100 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Update swift-mlx dependencies
-        if: ${{ github.event.client_payload.source_repo == 'mlx-swift' }}
+      # client_payload is attacker-controlled in principle — anything able to dispatch
+      # to this repository chooses these strings — and they end up in shell and in a
+      # ref name. Validate them here and pass them onward through the environment
+      # rather than interpolating ${{ }} into a run block, where a crafted tag would
+      # be executed rather than compared.
+      - name: Validate dispatch payload
+        env:
+          PAYLOAD_SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
+          PAYLOAD_NEW_TAG: ${{ github.event.client_payload.new_tag }}
         run: |
-          echo "Bumping mlx-swift dependency to ${{ github.event.client_payload.new_tag }}"
-          # In Package.swift we depend on branch main, but if we wanted to depend on a tag:
-          # SwiftPM resolves "main" to the latest commit automatically, but updating the SPM resolved file ensures deterministic builds:
-          swift package update mlx-swift
+          set -euo pipefail
+          case "$PAYLOAD_SOURCE_REPO" in
+            mlx-swift|mlx-swift-lm) ;;
+            *)
+              echo "::error::unexpected source_repo '$PAYLOAD_SOURCE_REPO' — expected mlx-swift or mlx-swift-lm"
+              exit 1
+              ;;
+          esac
+          if ! printf '%s' "$PAYLOAD_NEW_TAG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'; then
+            echo "::error::refusing tag '$PAYLOAD_NEW_TAG' — not a plain tag name"
+            exit 1
+          fi
+          {
+            echo "SOURCE_REPO=$PAYLOAD_SOURCE_REPO"
+            echo "NEW_TAG=$PAYLOAD_NEW_TAG"
+          } >> "$GITHUB_ENV"
 
-      - name: Update swift-mlx-lm dependencies
-        if: ${{ github.event.client_payload.source_repo == 'mlx-swift-lm' }}
+      # Both dependencies are `.package(path: "./…")` in Package.swift, backed by git
+      # submodules, so bumping either one is a pointer move. `swift package update`
+      # does nothing for a path dependency — SwiftPM takes whatever is on disk — which
+      # is why the mlx-swift branch of the previous version of this workflow could only
+      # ever have produced an empty commit.
+      - name: Move submodule to the released tag
         run: |
-          echo "Bumping local mlx-swift-lm submodule to ${{ github.event.client_payload.new_tag }}"
-          git submodule update --remote mlx-swift-lm
-          # Force the submodule onto the specific new release tag
-          cd mlx-swift-lm
-          git checkout ${{ github.event.client_payload.new_tag }}
-          cd ..
-          git add mlx-swift-lm
+          set -euo pipefail
+          git -C "$SOURCE_REPO" fetch --tags --force origin
+          if ! git -C "$SOURCE_REPO" rev-parse -q --verify "refs/tags/${NEW_TAG}^{commit}" >/dev/null; then
+            echo "::error::tag $NEW_TAG does not exist in $SOURCE_REPO"
+            exit 1
+          fi
+          before=$(git rev-parse "HEAD:$SOURCE_REPO")
+          git -C "$SOURCE_REPO" checkout --detach "refs/tags/$NEW_TAG"
+          after=$(git -C "$SOURCE_REPO" rev-parse HEAD)
+          {
+            echo "BEFORE_SHA=$before"
+            echo "AFTER_SHA=$after"
+          } >> "$GITHUB_ENV"
+          if [ "$before" = "$after" ]; then
+            echo "ALREADY_CURRENT=1" >> "$GITHUB_ENV"
+          fi
 
-      - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.SWIFTLM_PR_TOKEN }}
-          commit-message: "chore(deps): bump ${{ github.event.client_payload.source_repo }} to ${{ github.event.client_payload.new_tag }}"
-          title: "Update ${{ github.event.client_payload.source_repo }} Dependency to ${{ github.event.client_payload.new_tag }}"
-          body: |
-            Automated dependency update triggered by release `${{ github.event.client_payload.new_tag }}` in `SharpAI/${{ github.event.client_payload.source_repo }}`.
-            
-            This PR ensures SwiftLM is tracking the latest validated architectural improvements.
-          branch: "auto-update/${{ github.event.client_payload.source_repo }}-${{ github.event.client_payload.new_tag }}"
-          base: main
+      - name: Report an already-current submodule and stop
+        if: env.ALREADY_CURRENT == '1'
+        run: |
+          {
+            echo "### Nothing to bump"
+            echo
+            echo "\`$SOURCE_REPO\` is already at \`$NEW_TAG\` (\`${AFTER_SHA:0:7}\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push the bump branch
+        if: env.ALREADY_CURRENT != '1'
+        run: |
+          set -euo pipefail
+          branch="auto-update/${SOURCE_REPO}-${NEW_TAG}"
+          git checkout -B "$branch"
+          git add "$SOURCE_REPO"
+          git \
+            -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "chore(deps): bump $SOURCE_REPO to $NEW_TAG
+
+          Moves the $SOURCE_REPO submodule from ${BEFORE_SHA:0:7} to ${AFTER_SHA:0:7},
+          the commit tagged $NEW_TAG.
+
+          Prepared automatically; opened by hand so that CI runs against it."
+          # The auto-update/* namespace belongs to this workflow, so replacing a branch
+          # left by an earlier run for the same tag is safe and keeps re-runs idempotent.
+          git push --force origin "$branch"
+          echo "BUMP_BRANCH=$branch" >> "$GITHUB_ENV"
+
+      - name: Summarise, with a link that opens the pull request
+        if: env.ALREADY_CURRENT != '1'
+        run: |
+          {
+            echo "### \`$SOURCE_REPO\` → \`$NEW_TAG\` is ready"
+            echo
+            echo "Branch \`$BUMP_BRANCH\` pushed, moving the submodule from"
+            echo "\`${BEFORE_SHA:0:7}\` to \`${AFTER_SHA:0:7}\`."
+            echo
+            echo "**[Open the pull request](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...${BUMP_BRANCH}?expand=1)**"
+            echo
+            echo "No PR is opened here on purpose: GitHub does not start workflow runs"
+            echo "for events raised by \`GITHUB_TOKEN\`, so a bot-opened PR would never"
+            echo "get CI. Opening it yourself gets the checks this repository gates"
+            echo "releases on."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -104,6 +104,14 @@ jobs:
             models: mlx-community/gemma-4-e4b-it-4bit
           - modality: graph
             models: ""
+          # Synthetic checkpoints committed to the repository, a few hundred KB each,
+          # so this entry downloads nothing and needs no model cache. It covers the
+          # weight-and-config shapes behind #118, #120 and the b674 regression — the
+          # class of defect #128 found the unit suite has never caught, and which real
+          # checkpoints are too large to cover here (gemma-4-e2b alone is 3.6 GB
+          # against a 10 GB per-repository cache budget).
+          - modality: fixtures
+            models: ""
           # OpenAI-compatibility contract: what the client receives over the wire, once
           # real tokenisation decides chunk boundaries. Runs on the smallest model —
           # these assert server behaviour, not model quality (issue #128).

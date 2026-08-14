@@ -1,0 +1,8 @@
+{
+  "tokenizer_class": "PreTrainedTokenizerFast",
+  "bos_token": "<|endoftext|>",
+  "eos_token": "<|im_end|>",
+  "pad_token": "<pad>",
+  "unk_token": "<|endoftext|>",
+  "chat_template": "{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+}

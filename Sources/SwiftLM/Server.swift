@@ -43,15 +43,50 @@ private struct HubDownloader: Downloader, Sendable {
 }
 
 private struct TransformersTokenizerLoader: TokenizerLoader, Sendable {
+    /// Carried purely so template diagnostics can name the offending checkpoint; the
+    /// on-disk directory is a snapshot hash and means nothing to the person reading it.
+    let modelId: String
+    init(modelId: String = "this model") { self.modelId = modelId }
+
     func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
         let t = try await AutoTokenizer.from(modelFolder: directory)
-        return TransformersTokenizerBridge(t)
+        return TransformersTokenizerBridge(t, modelId: modelId)
+    }
+}
+
+/// A chat template that the Jinja parser rejected.
+///
+/// Worth its own type because the underlying error says only what the parser choked on
+/// — `parser('Unexpected token type: closeExpression')` — with no hint that the subject
+/// is a file shipped inside someone else's checkpoint. A model published with a
+/// malformed template loads fine, starts fine, and then fails every request, which
+/// reads as "the server is broken" rather than "this checkpoint is broken". That
+/// happened for real: LiquidAI republished LFM2.5-VL-450M-MLX-4bit with
+/// `{- bos_token -}}` (one brace short) and identifying it took a bisect across two
+/// model revisions.
+struct MalformedChatTemplate: Error, CustomStringConvertible {
+    let modelId: String
+    let underlying: String
+
+    var description: String {
+        """
+        The chat template shipped with \(modelId) is not valid Jinja and could not be \
+        parsed: \(underlying). This is a defect in the model's chat_template.jinja (or \
+        the chat_template field of its tokenizer_config.json), not in the request — \
+        report it to whoever publishes the checkpoint. Pinning to an earlier revision \
+        of the model is the usual workaround.
+        """
     }
 }
 
 private struct TransformersTokenizerBridge: MLXLMCommon.Tokenizer, Sendable {
     let upstream: any Tokenizers.Tokenizer
-    init(_ upstream: any Tokenizers.Tokenizer) { self.upstream = upstream }
+    /// Only used to name the model in template diagnostics.
+    let modelId: String
+    init(_ upstream: any Tokenizers.Tokenizer, modelId: String = "this model") {
+        self.upstream = upstream
+        self.modelId = modelId
+    }
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
         upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
     }
@@ -73,6 +108,12 @@ private struct TransformersTokenizerBridge: MLXLMCommon.Tokenizer, Sendable {
                 messages: messages, tools: tools, additionalContext: additionalContext)
         } catch Tokenizers.TokenizerError.missingChatTemplate {
             throw MLXLMCommon.TokenizerError.missingChatTemplate
+        } catch {
+            // A missing template is a legitimate state (base models have none) and keeps
+            // its own error above. Anything else here means the template exists but the
+            // parser would not take it, which is worth naming precisely.
+            throw MalformedChatTemplate(
+                modelId: modelId, underlying: String(describing: error))
         }
     }
 }
@@ -598,7 +639,7 @@ struct MLXServer: AsyncParsableCommand {
             print("[SwiftLM] Loading Omni-Language Model (Text + Vision + Audio)...")
             container = try await OmniModelFactory.shared.loadContainer(
                 from: downloader,
-                using: TransformersTokenizerLoader(),
+                using: TransformersTokenizerLoader(modelId: resolvedModelId),
                 configuration: modelConfig
             ) { progress in
                 tracker.printProgress(progress)
@@ -607,7 +648,7 @@ struct MLXServer: AsyncParsableCommand {
             print("[SwiftLM] Loading VLM (vision-language model)...")
             container = try await VLMModelFactory.shared.loadContainer(
                 from: downloader,
-                using: TransformersTokenizerLoader(),
+                using: TransformersTokenizerLoader(modelId: resolvedModelId),
                 configuration: modelConfig
             ) { progress in
                 tracker.printProgress(progress)
@@ -618,7 +659,7 @@ struct MLXServer: AsyncParsableCommand {
             // and the native prepareForMultimodal path extracts real mel features.
             container = try await OmniModelFactory.shared.loadContainer(
                 from: downloader,
-                using: TransformersTokenizerLoader(),
+                using: TransformersTokenizerLoader(modelId: resolvedModelId),
                 configuration: modelConfig
             ) { progress in
                 tracker.printProgress(progress)
@@ -627,7 +668,7 @@ struct MLXServer: AsyncParsableCommand {
             print("[SwiftLM] Loading LLM (large language model)...")
             container = try await LLMModelFactory.shared.loadContainer(
                 from: downloader,
-                using: TransformersTokenizerLoader(),
+                using: TransformersTokenizerLoader(modelId: resolvedModelId),
                 configuration: modelConfig
             ) { progress in
                 tracker.printProgress(progress)
@@ -674,7 +715,7 @@ struct MLXServer: AsyncParsableCommand {
             let draftDownloader = HubDownloader(hub: HubApi(downloadBase: cacheRoot))
             let draftContainer = try await LLMModelFactory.shared.loadContainer(
                 from: draftDownloader,
-                using: TransformersTokenizerLoader(),
+                using: TransformersTokenizerLoader(modelId: resolvedModelId),
                 configuration: draftConfig
             ) { progress in
                 // Silent loading for draft model
@@ -709,7 +750,7 @@ struct MLXServer: AsyncParsableCommand {
             let assistantDownloader = HubDownloader(hub: HubApi(downloadBase: cacheRoot))
             let assistantContainer = try await LLMModelFactory.shared.loadContainer(
                 from: assistantDownloader,
-                using: TransformersTokenizerLoader(),
+                using: TransformersTokenizerLoader(modelId: resolvedModelId),
                 configuration: assistantConfig
             ) { _ in }
             mtpAssistantModelRef = await assistantContainer.perform { assistantContext in
@@ -835,6 +876,34 @@ struct MLXServer: AsyncParsableCommand {
             }
         } else if self.streamExperts {
             print("[SwiftLM] 🧠 Auto-calibration (Wisdom) bypassed for SSD Streaming")
+        }
+
+        // Render the chat template once before opening the port. A checkpoint whose
+        // template does not parse otherwise loads cleanly, reports ready, and then fails
+        // every single request — a shape that reads as a broken server rather than a
+        // broken model, and that survives restarts without ever explaining itself.
+        // Failing here instead costs one template render and makes the cause the first
+        // thing anybody sees.
+        //
+        // A model with no chat template at all is a different and legitimate case (base
+        // models ship without one, and /v1/completions does not need it), so that is
+        // passed over rather than treated as a defect.
+        do {
+            let probeTokenizer = await container.tokenizer
+            // Shaped like the simplest real request rather than a bare minimum: one user
+            // turn with a generation prompt is what every chat template is written to
+            // handle, so a failure here is the template's, not the probe's.
+            _ = try probeTokenizer.applyChatTemplate(
+                messages: [["role": "user", "content": "ping"]],
+                tools: nil,
+                additionalContext: ["add_generation_prompt": true]
+            )
+        } catch let error as MalformedChatTemplate {
+            print("[SwiftLM] ❌ \(error.description)")
+            throw error
+        } catch {
+            // Missing template, or a template that needs context this probe does not
+            // supply. Neither is a reason to refuse to start.
         }
 
         print("[SwiftLM] Model loaded. Starting HTTP server on \(host):\(port)")

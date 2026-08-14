@@ -229,11 +229,89 @@ def build_gemma4_kv_shared(out, vestigial):
     return len(w)
 
 
+def build_moe_nested(out):
+    """A Qwen3-style MoE: per-expert tensors, nested config, decoy vision count.
+
+    Covers the MoE *load* path, which nothing else in CI touches — no MoE model is in
+    the matrix at all. Specifically: per-expert `mlp.experts.N.*` tensors being stacked
+    into `switch_mlp` by sanitize, and an expert count nested under `text_config`
+    rather than at top level.
+
+    What it does NOT cover, despite the nesting, is the #112 detection bug itself.
+    That bug was `num_local_experts` being the only spelling checked, so a config
+    declaring `num_experts` was called dense. But `modelTypeImpliesMoE` treats any
+    model_type containing "moe" as MoE regardless of keys, so `qwen3_moe` is caught by
+    that fallback whatever the config says — verified by reverting detection to the
+    single-key form and watching this fixture still enable streaming.
+
+    Reproducing #112 end to end needs a MoE architecture whose model_type does not
+    contain "moe" — deepseek_v3 (`n_routed_experts`) is the candidate. Its MLA
+    attention makes that a larger fixture; the profiler itself is covered directly by
+    ModelProfilerMoEDetectionTests in the meantime.
+    """
+    H, L, HEADS, KVH, HD = 64, 2, 4, 2, 16
+    INTER, MOE_INTER, EXPERTS, TOPK = 128, 32, 4, 2
+    rng = np.random.default_rng(0)
+
+    text_config = {
+        "model_type": "qwen3_moe",
+        "hidden_size": H,
+        "num_hidden_layers": L,
+        "intermediate_size": INTER,
+        "num_attention_heads": HEADS,
+        "num_key_value_heads": KVH,
+        "head_dim": HD,
+        "num_experts": EXPERTS,
+        "num_experts_per_tok": TOPK,
+        "moe_intermediate_size": MOE_INTER,
+        "decoder_sparse_step": 1,
+        "mlp_only_layers": [],
+        "rms_norm_eps": 1e-6,
+        "vocab_size": VOCAB,
+        "rope_theta": 10000.0,
+        "tie_word_embeddings": False,
+        "max_position_embeddings": 512,
+        "norm_topk_prob": True,
+    }
+    cfg = dict(text_config)
+    cfg["text_config"] = text_config
+    # Must not be mistaken for the language model's expert count.
+    cfg["vision_config"] = {"model_type": "qwen3_vl", "num_experts": 999}
+    json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=2)
+
+    w = {
+        "model.embed_tokens.weight": rand(rng, VOCAB, H),
+        "model.norm.weight": ones(H),
+        "lm_head.weight": rand(rng, VOCAB, H),
+    }
+    for i in range(L):
+        p_ = f"model.layers.{i}"
+        w[f"{p_}.self_attn.q_proj.weight"] = rand(rng, HEADS * HD, H)
+        w[f"{p_}.self_attn.k_proj.weight"] = rand(rng, KVH * HD, H)
+        w[f"{p_}.self_attn.v_proj.weight"] = rand(rng, KVH * HD, H)
+        w[f"{p_}.self_attn.o_proj.weight"] = rand(rng, H, HEADS * HD)
+        w[f"{p_}.self_attn.q_norm.weight"] = ones(HD)
+        w[f"{p_}.self_attn.k_norm.weight"] = ones(HD)
+        w[f"{p_}.input_layernorm.weight"] = ones(H)
+        w[f"{p_}.post_attention_layernorm.weight"] = ones(H)
+        w[f"{p_}.mlp.gate.weight"] = rand(rng, EXPERTS, H)
+        # Per-expert tensors, the layout a real checkpoint ships; sanitize stacks
+        # these into switch_mlp.
+        for e in range(EXPERTS):
+            w[f"{p_}.mlp.experts.{e}.gate_proj.weight"] = rand(rng, MOE_INTER, H)
+            w[f"{p_}.mlp.experts.{e}.up_proj.weight"] = rand(rng, MOE_INTER, H)
+            w[f"{p_}.mlp.experts.{e}.down_proj.weight"] = rand(rng, H, MOE_INTER)
+
+    save_file(w, os.path.join(out, "model.safetensors"), metadata={"format": "pt"})
+    return len(w)
+
+
 FIXTURES = {
     "dense": (build_dense, {}),
     "stray-shard": (build_dense, {"stray_shard": True}),
     "kv-shared-absent": (build_gemma4_kv_shared, {"vestigial": False}),
     "kv-shared-present": (build_gemma4_kv_shared, {"vestigial": True}),
+    "moe-nested": (build_moe_nested, {}),
 }
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ Usage:  python3 scripts/make-test-fixtures.py [output-dir]
 """
 import json
 import os
+import shutil
 import sys
 
 import numpy as np
@@ -230,77 +231,107 @@ def build_gemma4_kv_shared(out, vestigial):
 
 
 def build_moe_nested(out):
-    """A Qwen3-style MoE: per-expert tensors, nested config, decoy vision count.
+    """Gemma 4 with a MoE text block, so the expert count is genuinely nested.
 
-    Covers the MoE *load* path, which nothing else in CI touches — no MoE model is in
-    the matrix at all. Specifically: per-expert `mlp.experts.N.*` tensors being stacked
-    into `switch_mlp` by sanitize, and an expert count nested under `text_config`
-    rather than at top level.
+    An earlier version of this fixture used `qwen3_moe`, whose Swift configuration is
+    decoded from the root of config.json — so the expert count had to sit at the top
+    level, and the "nested" copy underneath it was never reached. `findExpertCounts`
+    is breadth-first and returned on the root hit, which made both the nesting and the
+    vision decoy dead weight.
 
-    What it does NOT cover, despite the nesting, is the #112 detection bug itself.
-    That bug was `num_local_experts` being the only spelling checked, so a config
-    declaring `num_experts` was called dense. But `modelTypeImpliesMoE` treats any
-    model_type containing "moe" as MoE regardless of keys, so `qwen3_moe` is caught by
-    that fallback whatever the config says — verified by reverting detection to the
-    single-key form and watching this fixture still enable streaming.
+    `Gemma4Configuration` decodes `text_config` and nothing else, so here the count
+    exists *only* one level down. That makes two things real rather than decorative:
+    the nested walk added in #112's review follow-up, and the rule that a count under
+    `vision_config` must not be mistaken for the language model's.
 
-    Reproducing #112 end to end needs a MoE architecture whose model_type does not
-    contain "moe" — deepseek_v3 (`n_routed_experts`) is the candidate. Its MLA
-    attention makes that a larger fixture; the profiler itself is covered directly by
-    ModelProfilerMoEDetectionTests in the meantime.
+    It also covers the fused-expert remap: real gemma4 checkpoints ship
+    `experts.gate_up_proj` as one tensor that sanitize splits in half into
+    `switch_glu.gate_proj` / `switch_glu.up_proj`. A wrong split axis, or swapped
+    halves, is a silent numerical fault no unit test here would see.
     """
     H, L, HEADS, KVH, HD = 64, 2, 4, 2, 16
     INTER, MOE_INTER, EXPERTS, TOPK = 128, 32, 4, 2
+    PLI, VPLI = 32, 16
     rng = np.random.default_rng(0)
 
     text_config = {
-        "model_type": "qwen3_moe",
+        "model_type": "gemma4_text",
         "hidden_size": H,
         "num_hidden_layers": L,
         "intermediate_size": INTER,
         "num_attention_heads": HEADS,
         "num_key_value_heads": KVH,
         "head_dim": HD,
-        "num_experts": EXPERTS,
-        "num_experts_per_tok": TOPK,
-        "moe_intermediate_size": MOE_INTER,
-        "decoder_sparse_step": 1,
-        "mlp_only_layers": [],
+        "global_head_dim": HD,
         "rms_norm_eps": 1e-6,
         "vocab_size": VOCAB,
+        "rope_traditional": False,
         "rope_theta": 10000.0,
-        "tie_word_embeddings": False,
+        "sliding_window": 128,
+        "sliding_window_pattern": 1,
         "max_position_embeddings": 512,
-        "norm_topk_prob": True,
+        "num_kv_shared_layers": 0,
+        "use_double_wide_mlp": False,
+        "tie_word_embeddings": True,
+        "hidden_size_per_layer_input": PLI,
+        "vocab_size_per_layer_input": VPLI,
+        "final_logit_softcapping": 30.0,
+        "attention_k_eq_v": False,
+        "enable_moe_block": True,
+        "num_experts": EXPERTS,
+        "top_k_experts": TOPK,
+        "moe_intermediate_size": MOE_INTER,
     }
-    cfg = dict(text_config)
-    cfg["text_config"] = text_config
-    # Must not be mistaken for the language model's expert count.
-    cfg["vision_config"] = {"model_type": "qwen3_vl", "num_experts": 999}
+    # num_experts appears here and nowhere else at the root — that is the point.
+    cfg = {
+        "model_type": "gemma4",
+        "architectures": ["Gemma4ForConditionalGeneration"],
+        "vocab_size": VOCAB,
+        "text_config": text_config,
+        # A decoy the language-model walk has to skip.
+        "vision_config": {"model_type": "gemma4_vision", "num_experts": 999},
+    }
     json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=2)
 
     w = {
-        "model.embed_tokens.weight": rand(rng, VOCAB, H),
-        "model.norm.weight": ones(H),
-        "lm_head.weight": rand(rng, VOCAB, H),
+        "language_model.model.embed_tokens.weight": rand(rng, VOCAB, H),
+        "language_model.model.norm.weight": ones(H),
+        "language_model.model.embed_tokens_per_layer.weight": rand(rng, VPLI, L * PLI),
+        "language_model.model.per_layer_model_projection.weight": rand(rng, L * PLI, H),
+        "language_model.model.per_layer_projection_norm.weight": ones(PLI),
     }
     for i in range(L):
-        p_ = f"model.layers.{i}"
+        # A gemma4 wrapper checkpoint prefixes its text weights this way; matches
+        # what a real gemma-4-e2b ships.
+        p_ = f"language_model.model.layers.{i}"
         w[f"{p_}.self_attn.q_proj.weight"] = rand(rng, HEADS * HD, H)
         w[f"{p_}.self_attn.k_proj.weight"] = rand(rng, KVH * HD, H)
         w[f"{p_}.self_attn.v_proj.weight"] = rand(rng, KVH * HD, H)
         w[f"{p_}.self_attn.o_proj.weight"] = rand(rng, H, HEADS * HD)
         w[f"{p_}.self_attn.q_norm.weight"] = ones(HD)
         w[f"{p_}.self_attn.k_norm.weight"] = ones(HD)
+        w[f"{p_}.layer_scalar"] = np.ones(1, np.float16)
+        w[f"{p_}.mlp.gate_proj.weight"] = rand(rng, INTER, H)
+        w[f"{p_}.mlp.up_proj.weight"] = rand(rng, INTER, H)
+        w[f"{p_}.mlp.down_proj.weight"] = rand(rng, H, INTER)
         w[f"{p_}.input_layernorm.weight"] = ones(H)
         w[f"{p_}.post_attention_layernorm.weight"] = ones(H)
-        w[f"{p_}.mlp.gate.weight"] = rand(rng, EXPERTS, H)
-        # Per-expert tensors, the layout a real checkpoint ships; sanitize stacks
-        # these into switch_mlp.
-        for e in range(EXPERTS):
-            w[f"{p_}.mlp.experts.{e}.gate_proj.weight"] = rand(rng, MOE_INTER, H)
-            w[f"{p_}.mlp.experts.{e}.up_proj.weight"] = rand(rng, MOE_INTER, H)
-            w[f"{p_}.mlp.experts.{e}.down_proj.weight"] = rand(rng, H, MOE_INTER)
+        w[f"{p_}.pre_feedforward_layernorm.weight"] = ones(H)
+        w[f"{p_}.post_feedforward_layernorm.weight"] = ones(H)
+        w[f"{p_}.per_layer_input_gate.weight"] = rand(rng, PLI, H)
+        w[f"{p_}.per_layer_projection.weight"] = rand(rng, H, PLI)
+        w[f"{p_}.post_per_layer_input_norm.weight"] = ones(H)
+        # Router and experts are siblings of mlp on the decoder layer, not nested in it.
+        # Enabling the MoE block also builds a second pair of feedforward norms.
+        w[f"{p_}.pre_feedforward_layernorm_2.weight"] = ones(H)
+        w[f"{p_}.post_feedforward_layernorm_1.weight"] = ones(H)
+        w[f"{p_}.post_feedforward_layernorm_2.weight"] = ones(H)
+        w[f"{p_}.router.proj.weight"] = rand(rng, EXPERTS, H)
+        w[f"{p_}.router.scale"] = ones(H)
+        w[f"{p_}.router.per_expert_scale"] = ones(EXPERTS)
+        # Fused, as a real checkpoint ships it: sanitize splits dim -2 in half.
+        w[f"{p_}.experts.gate_up_proj"] = rand(rng, EXPERTS, 2 * MOE_INTER, H)
+        w[f"{p_}.experts.down_proj"] = rand(rng, EXPERTS, H, MOE_INTER)
 
     save_file(w, os.path.join(out, "model.safetensors"), metadata={"format": "pt"})
     return len(w)
@@ -319,7 +350,16 @@ if __name__ == "__main__":
     total = 0
     for name, (fn, kwargs) in FIXTURES.items():
         out = os.path.join(ROOT, name)
-        os.makedirs(out, exist_ok=True)
+        # Clear this fixture's own directory, and only its own. Writing over an existing
+        # one leaves behind files the current builder no longer emits — flip stray-shard
+        # off and its decoy shard and index survive, so the fixture keeps testing a shape
+        # the source no longer describes, and the printed size counts files that are not
+        # part of it. Scoping the removal to one known fixture directory is also what
+        # keeps regeneration from reaching siblings such as tests/fixtures/omni, whose
+        # assets belong to test-omni.sh and are not generated here.
+        if os.path.isdir(out):
+            shutil.rmtree(out)
+        os.makedirs(out)
         n = fn(out, **kwargs)
         write_tokenizer(out)
         size = sum(os.path.getsize(os.path.join(out, f)) for f in os.listdir(out))

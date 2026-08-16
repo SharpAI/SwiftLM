@@ -32,8 +32,8 @@
     "top_k_experts": 2,
     "moe_intermediate_size": 32
   },
-  "vision_config": {
-    "model_type": "gemma4_vision",
+  "audio_config": {
+    "model_type": "gemma4_audio",
     "num_experts": 999
   }
 }

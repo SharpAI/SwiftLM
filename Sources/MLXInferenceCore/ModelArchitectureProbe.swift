@@ -27,7 +27,16 @@ public enum ModelArchitectureProbe {
         "qwen3_5_moe",
         "idefics3",
         "gemma3",
-        "gemma4",
+        // "gemma4" deliberately absent: this codebase registers that exact model_type
+        // in both LLMModelFactory (MLXLLM/Gemma4.swift, text_config only, no vision
+        // field at all) and VLMModelFactory (MLXVLM/Gemma4.swift, vision_config
+        // required). The string alone cannot tell them apart — matching on it treated
+        // every real text-only Gemma4 checkpoint as a VLM and routed it to a factory
+        // whose config decoder requires a field the checkpoint never has, which is a
+        // hard failure, not a degraded one. The vision_config-presence check below
+        // already distinguishes the two correctly, since only the VLM struct requires
+        // that field — this entry was strictly redundant on the VLM side and wrong on
+        // the LLM side.
         "smolvlm",
         "fastvlm",
         "llava_qwen2",

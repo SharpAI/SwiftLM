@@ -11,7 +11,7 @@
 #   kv-shared-absent    #120: gemma-4-e4b shape, shared layers ship no k/v
 #   kv-shared-present   b674:  gemma-4-e2b shape, shared layers ship k/v anyway
 #   moe-nested          #112: expert count nested under text_config only, with a
-#                       decoy count under vision_config; plus the fused
+#                       decoy count under audio_config; plus the fused
 #                       experts.gate_up_proj split that sanitize performs
 #
 # The output is gibberish by construction — the weights are random. A fixture passes
@@ -139,7 +139,7 @@ if [ "$ready" -ne 1 ]; then
 elif grep -q "is not MoE" "$MOE_LOG"; then
     fail "nested expert count missed: $(grep 'is not MoE' "$MOE_LOG" | head -1)"
 else
-    pass "moe-nested: expert count found under text_config, vision decoy ignored"
+    pass "moe-nested: expert count found under text_config, decoy container ignored"
 fi
 cleanup
 

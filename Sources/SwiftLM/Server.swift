@@ -624,7 +624,34 @@ struct MLXServer: AsyncParsableCommand {
             configuration: modelConfig,
             downloader: downloader
         )
-        let isVision = self.vision
+        // architecture is probed above for both paths; the CLI previously discarded it
+        // here (`let isVision = self.vision`), so a known VLM checkpoint loaded as a
+        // plain LLM unless the user remembered `--vision` — confirmed by running
+        // LiquidAI/LFM2.5-VL-450M-MLX-4bit without the flag: "Loading LLM" and the
+        // subsequent image request failed. InferenceEngine.swift (SwiftBuddy's loader)
+        // already auto-detects unconditionally; this mirrors that for the CLI binary
+        // while keeping --vision/--audio as explicit overrides.
+        // Speculative/MTP decoding (--draft-model, --dflash, --mtp) only wires up
+        // BaseLanguageModel from LLMModelFactory — a VLMModelFactory container isn't
+        // a DualModelMTP/generateMTP participant. Auto-detection must not flip a
+        // speculative-decoding session into VLM mode just because the checkpoint
+        // carries a vision_config (e.g. mlx-community/Qwen3.5-*-4bit ships one even
+        // when used purely as a text draft/main pair): doing so crashed the server
+        // with a Trace/BPT trap on the first real generation request, caught by CI's
+        // speculative-decoding suite. --vision remains a valid explicit override.
+        let speculativeDecodingRequested = self.draftModel != nil || self.dflash || self.mtp
+        let autoDetectedVision = !self.audio && architecture.supportsVision
+            && !speculativeDecodingRequested
+        let isVision = self.vision || autoDetectedVision
+        if architecture.supportsVision, !self.vision, !self.audio, speculativeDecodingRequested {
+            print(
+                "[SwiftLM] Note: \(architecture.modelType ?? "unknown") reports vision support, but speculative/MTP decoding was requested; loading as a text-only LLM."
+            )
+        } else if autoDetectedVision {
+            print(
+                "[SwiftLM] Auto-detected VLM config (\(architecture.modelType ?? "unknown")); enabling vision mode."
+            )
+        }
         let container: ModelContainer
         
         // Handle getting the simple model ID string for the tracker

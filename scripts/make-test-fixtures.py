@@ -242,7 +242,9 @@ def build_moe_nested(out):
     `Gemma4Configuration` decodes `text_config` and nothing else, so here the count
     exists *only* one level down. That makes two things real rather than decorative:
     the nested walk added in #112's review follow-up, and the rule that a count under
-    `vision_config` must not be mistaken for the language model's.
+    a sibling container must not be mistaken for the language model's. The decoy
+    container is `audio_config`, not `vision_config` — see the comment where it is
+    built for why.
 
     It also covers the fused-expert remap: real gemma4 checkpoints ship
     `experts.gate_up_proj` as one tensor that sanitize splits in half into
@@ -288,8 +290,15 @@ def build_moe_nested(out):
         "architectures": ["Gemma4ForConditionalGeneration"],
         "vocab_size": VOCAB,
         "text_config": text_config,
-        # A decoy the language-model walk has to skip.
-        "vision_config": {"model_type": "gemma4_vision", "num_experts": 999},
+        # A decoy the language-model walk has to skip. audio_config, not
+        # vision_config: ModelArchitectureProbe.inspect treats the mere presence of a
+        # vision_config key as proof of vision support, so using it here made this
+        # text-only fixture auto-detect as a VLM and route to VLMModelFactory, which
+        # has no vision weights to find — found when the SwiftLM CLI started acting on
+        # that probe's result instead of discarding it. audio_config is excluded from
+        # the expert-count walk by ModelProfiler.nonLanguageContainers the same way,
+        # without tripping that probe.
+        "audio_config": {"model_type": "gemma4_audio", "num_experts": 999},
     }
     json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=2)
 

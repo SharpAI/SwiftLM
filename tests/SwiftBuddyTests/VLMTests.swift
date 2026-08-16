@@ -12,6 +12,25 @@ final class VLMTests: XCTestCase {
         XCTAssertTrue(found, "Output should indicate VLM is loading. Got: \(accumulated)")
     }
 
+    // Feature 2: a known VLM checkpoint loads as a VLM without --vision.
+    //
+    // Before this test could pass, the CLI computed the architecture probe and then
+    // discarded it (`let isVision = self.vision`) — confirmed by running this exact
+    // model without --vision and observing "Loading LLM" followed by a failed image
+    // request. InferenceEngine.swift (SwiftBuddy's own loader) already auto-detected
+    // unconditionally; the CLI now does the same while --vision/--audio remain
+    // explicit overrides.
+    func testVLM_AutoDetectsLFM25WithoutVisionFlag() async throws {
+        let accumulated = try await captureStartupOutput(arguments: [
+            "--model", "LiquidAI/LFM2.5-VL-450M-MLX-4bit",
+        ], timeout: 20.0)
+
+        XCTAssertTrue(
+            accumulated.contains("Auto-detected VLM config")
+                || accumulated.contains("Loading VLM"),
+            "Output should indicate VLM auto-detection/loading. Got: \(accumulated)"
+        )
+    }
 
     private func captureStartupOutput(
         arguments: [String],

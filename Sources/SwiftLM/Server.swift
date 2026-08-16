@@ -624,7 +624,19 @@ struct MLXServer: AsyncParsableCommand {
             configuration: modelConfig,
             downloader: downloader
         )
-        let isVision = self.vision
+        // architecture is probed above for both paths; the CLI previously discarded it
+        // here (`let isVision = self.vision`), so a known VLM checkpoint loaded as a
+        // plain LLM unless the user remembered `--vision` — confirmed by running
+        // LiquidAI/LFM2.5-VL-450M-MLX-4bit without the flag: "Loading LLM" and the
+        // subsequent image request failed. InferenceEngine.swift (SwiftBuddy's loader)
+        // already auto-detects unconditionally; this mirrors that for the CLI binary
+        // while keeping --vision/--audio as explicit overrides.
+        let isVision = self.vision || (!self.audio && architecture.supportsVision)
+        if architecture.supportsVision, !self.vision, !self.audio {
+            print(
+                "[SwiftLM] Auto-detected VLM config (\(architecture.modelType ?? "unknown")); enabling vision mode."
+            )
+        }
         let container: ModelContainer
         
         // Handle getting the simple model ID string for the tracker

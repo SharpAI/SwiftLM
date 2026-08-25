@@ -22,21 +22,22 @@ public enum ModelArchitectureProbe {
         "qwen2.5-vl",
         "qwen3_vl",
         "qwen3-vl",
-        "qwen3_5",
-        "qwen3.5",
-        "qwen3_5_moe",
+        // "gemma4" and "qwen3_5"/"qwen3_5_moe" deliberately absent: this codebase
+        // registers each of these exact model_type strings in BOTH LLMModelFactory
+        // (text_config only, no vision field at all) and VLMModelFactory
+        // (vision_config required) — see LLMModelFactory.swift/VLMModelFactory.swift.
+        // The string alone cannot tell the two apart — matching on it treated every
+        // real text-only checkpoint sharing that model_type as a VLM and routed it to
+        // a factory whose config decoder requires a field the checkpoint never has,
+        // which is a hard failure, not a degraded one (reported for gemma4 in #152,
+        // and again for qwen3_5_moe in #156, against a genuinely text-only
+        // Qwen3.6-35B-A3B checkpoint with no vision_config). The vision_config-presence
+        // check below already distinguishes the two correctly, since only the VLM
+        // struct requires that field — these entries were strictly redundant on the
+        // VLM side and wrong on the LLM side. ("qwen3.5" is likewise omitted: it would
+        // only ever normalize to "qwen3_5" anyway, so it was already a dead duplicate.)
         "idefics3",
         "gemma3",
-        // "gemma4" deliberately absent: this codebase registers that exact model_type
-        // in both LLMModelFactory (MLXLLM/Gemma4.swift, text_config only, no vision
-        // field at all) and VLMModelFactory (MLXVLM/Gemma4.swift, vision_config
-        // required). The string alone cannot tell them apart — matching on it treated
-        // every real text-only Gemma4 checkpoint as a VLM and routed it to a factory
-        // whose config decoder requires a field the checkpoint never has, which is a
-        // hard failure, not a degraded one. The vision_config-presence check below
-        // already distinguishes the two correctly, since only the VLM struct requires
-        // that field — this entry was strictly redundant on the VLM side and wrong on
-        // the LLM side.
         "smolvlm",
         "fastvlm",
         "llava_qwen2",

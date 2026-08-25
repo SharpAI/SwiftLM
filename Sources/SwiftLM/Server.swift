@@ -49,8 +49,85 @@ private struct TransformersTokenizerLoader: TokenizerLoader, Sendable {
     init(modelId: String = "this model") { self.modelId = modelId }
 
     func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
-        let t = try await AutoTokenizer.from(modelFolder: directory)
+        let effectiveDirectory = Self.remappingUnigramTokenizerClassIfNeeded(in: directory, modelId: modelId)
+        let t = try await AutoTokenizer.from(modelFolder: effectiveDirectory)
         return TransformersTokenizerBridge(t, modelId: modelId)
+    }
+
+    /// swift-transformers' `TokenizerModel.from(...)` picks a concrete tokenizer
+    /// implementation purely from the `tokenizer_class` name string (its
+    /// `knownTokenizers` table) — it never inspects `tokenizer.json`'s own
+    /// `model.type`. After stripping a `"Fast"` suffix, `"PreTrainedTokenizerFast"`
+    /// becomes `"PreTrainedTokenizer"`, which the table maps explicitly to
+    /// `BPETokenizer`. When the checkpoint's actual `tokenizer.json` is Unigram
+    /// (SentencePiece-style — common for models trained from scratch with a custom
+    /// vocab, e.g. several Japanese LLM projects that build their own vocab and
+    /// save via `AutoTokenizer`/`PreTrainedTokenizerFast` without a dedicated
+    /// subclass), there is no `merges` field and `BPETokenizer` hits a
+    /// `fatalError` instead of throwing (SwiftLM#155, reported by @kei-Optim).
+    ///
+    /// Workaround until the fix lands upstream in `huggingface/swift-transformers`
+    /// (`TokenizerModel.from` should consult `tokenizer.json`'s `model.type` when
+    /// `tokenizer_class` is generic/unknown): if `tokenizer.json` declares a
+    /// Unigram model and `tokenizer_config.json`'s `tokenizer_class` isn't already
+    /// one of the table's Unigram-mapped names, build a scratch copy of the
+    /// checkpoint directory — original files referenced via symlink, so the HF
+    /// cache is untouched — with `tokenizer_config.json`'s `tokenizer_class`
+    /// rewritten to `"XLMRobertaTokenizer"`, which resolves to `UnigramTokenizer`.
+    /// Its `init(tokenizerConfig:tokenizerData:addedTokens:)` doesn't depend on the
+    /// class name itself, so the rewrite is otherwise inert.
+    private static func remappingUnigramTokenizerClassIfNeeded(
+        in directory: URL, modelId: String
+    ) -> URL {
+        let tokenizerDataURL = directory.appendingPathComponent("tokenizer.json")
+        let tokenizerConfigURL = directory.appendingPathComponent("tokenizer_config.json")
+        guard
+            let tokenizerData = try? Data(contentsOf: tokenizerDataURL),
+            let tokenizerJSON = try? JSONSerialization.jsonObject(with: tokenizerData) as? [String: Any],
+            (tokenizerJSON["model"] as? [String: Any])?["type"] as? String == "Unigram",
+            let configData = try? Data(contentsOf: tokenizerConfigURL),
+            var configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any]
+        else {
+            return directory
+        }
+
+        let unigramMappedClasses: Set<String> = [
+            "XLMRobertaTokenizer", "Xlm-RobertaTokenizer", "T5Tokenizer",
+        ]
+        let currentClass = (configJSON["tokenizer_class"] as? String)?
+            .replacingOccurrences(of: "Fast", with: "")
+        if let currentClass, unigramMappedClasses.contains(currentClass) {
+            return directory
+        }
+
+        let originalClassDescription = (configJSON["tokenizer_class"] as? String) ?? "unset"
+        let scratchDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("swiftlm-unigram-tokenizer-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: scratchDirectory, withIntermediateDirectories: true)
+            let contents = try FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil)
+            for fileURL in contents where fileURL.lastPathComponent != "tokenizer_config.json" {
+                try FileManager.default.createSymbolicLink(
+                    at: scratchDirectory.appendingPathComponent(fileURL.lastPathComponent),
+                    withDestinationURL: fileURL)
+            }
+            configJSON["tokenizer_class"] = "XLMRobertaTokenizer"
+            let rewritten = try JSONSerialization.data(
+                withJSONObject: configJSON, options: [.prettyPrinted])
+            try rewritten.write(to: scratchDirectory.appendingPathComponent("tokenizer_config.json"))
+        } catch {
+            // Scratch-directory setup is best-effort — fall through to the original
+            // directory rather than fail the whole load over a workaround failing.
+            return directory
+        }
+
+        print(
+            "[SwiftLM] \(modelId): tokenizer.json is Unigram but tokenizer_class is generic "
+                + "(\"\(originalClassDescription)\"); loading via a remapped tokenizer_class "
+                + "so it resolves to UnigramTokenizer instead of crashing in BPETokenizer.")
+        return scratchDirectory
     }
 }
 

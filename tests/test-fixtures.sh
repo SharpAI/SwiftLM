@@ -13,7 +13,11 @@
 #   moe-nested          #112: expert count nested under text_config only, with a
 #                       decoy count under audio_config; plus the fused
 #                       experts.gate_up_proj split that sanitize performs
+#   unigram-tokenizer   #155: a Unigram tokenizer.json saved under the generic
+#                       tokenizer_class "PreTrainedTokenizerFast", which resolved to
+#                       BPETokenizer and fatalError'd on the missing "merges" field
 #
+
 # The output is gibberish by construction — the weights are random. A fixture passes
 # when the server loads it and produces *a* token, which is what exercises config
 # parsing, weight-key resolution, sanitisation and layer materialisation.
@@ -105,7 +109,7 @@ sys.exit(0 if ok else 1)' 2>/dev/null; then
 }
 
 log "Binary: $BINARY"
-for name in dense stray-shard kv-shared-absent kv-shared-present moe-nested; do
+for name in dense stray-shard kv-shared-absent kv-shared-present moe-nested unigram-tokenizer; do
     log "Shape: $name"
     run_fixture "$name"
 done

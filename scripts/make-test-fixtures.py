@@ -77,6 +77,44 @@ def write_tokenizer(out):
     )
 
 
+def write_unigram_tokenizer(out):
+    """SwiftLM#155: a SentencePiece-style Unigram model.json, saved (as several real
+    Japanese-LLM checkpoints do) with the generic tokenizer_class "PreTrainedTokenizerFast"
+    rather than a class swift-transformers' knownTokenizers table maps to UnigramTokenizer
+    (XLMRobertaTokenizer, Xlm-RobertaTokenizer, T5Tokenizer). Before #155's fix, that
+    combination resolved to BPETokenizer, which fatalErrors on the missing "merges" field
+    instead of throwing. Same 288-token vocab as write_tokenizer, just a different model
+    algorithm and score instead of merges, so this drops in for build_dense's config/weights
+    unchanged.
+    """
+    vocab = [(t, 0.0 if t == SPECIALS[0] else -1.0) for t in SPECIALS]
+    for ch in sorted(pre_tokenizers.ByteLevel.alphabet()):
+        vocab.append((ch, -2.0 - len(vocab) * 0.01))
+    while len(vocab) < VOCAB:
+        vocab.append((f"<|unused{len(vocab)}|>", -10.0))
+
+    tok = Tokenizer(models.Unigram(vocab, 0, byte_fallback=False))
+    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tok.decoder = decoders.ByteLevel()
+    tok.post_processor = processors.ByteLevel(trim_offsets=False)
+    tok.add_special_tokens(SPECIALS)
+    tok.save(os.path.join(out, "tokenizer.json"))
+
+    json.dump(
+        {
+            # The bug trigger: generic tokenizer_class alongside a Unigram model.json.
+            "tokenizer_class": "PreTrainedTokenizerFast",
+            "bos_token": "<|endoftext|>",
+            "eos_token": "<|im_end|>",
+            "pad_token": "<pad>",
+            "unk_token": "<|endoftext|>",
+            "chat_template": CHAT_TEMPLATE,
+        },
+        open(os.path.join(out, "tokenizer_config.json"), "w"),
+        indent=2,
+    )
+
+
 def rand(rng, *shape):
     return (rng.standard_normal(shape) * 0.02).astype(np.float16)
 
@@ -352,12 +390,15 @@ FIXTURES = {
     "kv-shared-absent": (build_gemma4_kv_shared, {"vestigial": False}),
     "kv-shared-present": (build_gemma4_kv_shared, {"vestigial": True}),
     "moe-nested": (build_moe_nested, {}),
+    "unigram-tokenizer": (build_dense, {}, write_unigram_tokenizer),
 }
 
 if __name__ == "__main__":
     os.makedirs(ROOT, exist_ok=True)
     total = 0
-    for name, (fn, kwargs) in FIXTURES.items():
+    for name, spec in FIXTURES.items():
+        fn, kwargs, *rest = spec
+        tokenizer_writer = rest[0] if rest else write_tokenizer
         out = os.path.join(ROOT, name)
         # Clear this fixture's own directory, and only its own. Writing over an existing
         # one leaves behind files the current builder no longer emits — flip stray-shard
@@ -370,7 +411,7 @@ if __name__ == "__main__":
             shutil.rmtree(out)
         os.makedirs(out)
         n = fn(out, **kwargs)
-        write_tokenizer(out)
+        tokenizer_writer(out)
         size = sum(os.path.getsize(os.path.join(out, f)) for f in os.listdir(out))
         total += size
         print(f"  {name:<20} {n:>3} tensors  {size/1024:>7.1f} KB")

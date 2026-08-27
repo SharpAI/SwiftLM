@@ -223,7 +223,19 @@ public enum ModelStorage {
     /// Checks `text_config.max_position_embeddings` first (VLM/MoE models),
     /// then falls back to top-level `max_position_embeddings`.
     public static func readMaxContextLength(for modelId: String) -> Int? {
-        guard let config = readModelConfig(for: modelId) else { return nil }
+        maxContextLength(fromConfig: readModelConfig(for: modelId))
+    }
+
+    /// Same as `readMaxContextLength(for:)` but for a model addressed by an
+    /// arbitrary directory rather than a HuggingFace-cache-resolved model ID —
+    /// used when loading a model the user pointed at directly (see
+    /// `isLocalDirectoryPath`).
+    public static func readMaxContextLength(inDirectory directory: URL) -> Int? {
+        maxContextLength(fromConfig: readModelConfig(inDirectory: directory))
+    }
+
+    private static func maxContextLength(fromConfig config: [String: Any]?) -> Int? {
+        guard let config else { return nil }
 
         // VLM/MoE models nest the context length in text_config
         if let textConfig = config["text_config"] as? [String: Any],
@@ -241,6 +253,31 @@ public enum ModelStorage {
         if let maxSeq = config["max_seq_len"] as? Int { return maxSeq }
 
         return nil
+    }
+
+    // MARK: — Local Directory Models
+
+    /// Whether `modelId` is actually a filesystem path to a directory the user
+    /// pointed the app at directly (e.g. a model on an external drive downloaded
+    /// via `hf download --local-dir`), rather than a HuggingFace repo ID.
+    ///
+    /// Mirrors the identical check the `SwiftLM` CLI's `Server.swift` already
+    /// does for `--model`: a plain `FileManager` existence + directory check, no
+    /// `~` expansion (the caller is expected to hand over an already-resolved
+    /// absolute path — see `ModelManagementView`'s `NSOpenPanel` flow).
+    public static func isLocalDirectoryPath(_ modelId: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: modelId, isDirectory: &isDirectory)
+            && isDirectory.boolValue
+    }
+
+    /// Whether `directory` looks like a usable model folder — same weight/config
+    /// validation `verifyModelIntegrity` applies to HuggingFace-cache layouts,
+    /// reused here so a folder picked via `NSOpenPanel` can be rejected with a
+    /// clear error before `InferenceEngine.load` ever attempts to construct a
+    /// model from it.
+    public static func validateLocalModelDirectory(_ directory: URL) -> Bool {
+        validateModelFiles(in: directory, logFailures: true)
     }
 
     /// Read the raw config.json dictionary for a downloaded model.
@@ -347,13 +384,20 @@ public enum ModelStorage {
 
     public static func readModelConfig(for modelId: String) -> [String: Any]? {
         for directory in modelContentDirectories(for: modelId) {
-            let configPath = directory.appendingPathComponent("config.json")
-            guard let data = try? Data(contentsOf: configPath),
-                  let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { continue }
-            return config
+            if let config = readModelConfig(inDirectory: directory) { return config }
         }
         return nil
+    }
+
+    /// Same as `readModelConfig(for:)` but for an already-resolved directory —
+    /// used for local models addressed directly by path (see
+    /// `isLocalDirectoryPath`), which have no HuggingFace-cache layout to scan.
+    public static func readModelConfig(inDirectory directory: URL) -> [String: Any]? {
+        let configPath = directory.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: configPath),
+              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return config
     }
 
     // MARK: — Disk Operations

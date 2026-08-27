@@ -308,6 +308,14 @@ public final class InferenceEngine: ObservableObject {
         }
         corruptedModelId = nil
 
+        // A path the user pointed the app at directly (e.g. via "Add Local
+        // Model…") — never downloaded, never in the HF cache, so the usual
+        // verify-or-download flow doesn't apply; go straight to loading it.
+        if ModelStorage.isLocalDirectoryPath(modelId) {
+            await loadVerifiedModel(modelId: modelId)
+            return
+        }
+
         guard ModelStorage.verifyModelIntegrity(for: modelId) else {
             await downloadThenLoad(modelId: modelId)
             return
@@ -347,6 +355,19 @@ public final class InferenceEngine: ObservableObject {
         setLoadingState(progress: 0.05, stage: "Preparing model configuration")
         currentModelId = modelId
 
+        // Two distinct kinds of "not in the normal cache" model share this function:
+        //  - `isLocalDirectoryPath`: modelId IS the directory (e.g. picked via "Add
+        //    Local Model…", possibly on an external drive entirely outside cacheRoot)
+        //  - `localDirectory`: modelId is still an HF-style "org/name" id, but its
+        //    files were copied by hand into a recognised cacheRoot-relative layout
+        //    (issue #110) rather than downloaded — resolved through the existing
+        //    ModelStorage id-based helpers below, which still work for this case.
+        // Only the first needs its own directory-based helpers throughout this
+        // function; ModelStorage.*(for: modelId) already finds the right directory
+        // for the second, the same way it does for a normally-downloaded model.
+        let explicitLocalDirectory: URL? =
+            ModelStorage.isLocalDirectoryPath(modelId) ? URL(filePath: modelId) : nil
+
         do {
             let hub = HubApi(downloadBase: ModelStorage.cacheRoot)
 
@@ -360,7 +381,9 @@ public final class InferenceEngine: ObservableObject {
             // pointing the loader at them would list the model and then re-download it —
             // several GB for a model already on disk. Load such models by directory.
             var config: ModelConfiguration
-            if let localDirectory = ModelStorage.localLoadDirectory(for: modelId) {
+            if let explicitLocalDirectory {
+                config = ModelConfiguration(directory: explicitLocalDirectory)
+            } else if let localDirectory = ModelStorage.localLoadDirectory(for: modelId) {
                 config = ModelConfiguration(directory: localDirectory)
             } else {
                 config = ModelConfiguration(id: modelId)
@@ -377,7 +400,7 @@ public final class InferenceEngine: ObservableObject {
             let shouldStream = generationConfig.effectiveStreamExperts(defaultingTo: isMoE)
             if shouldStream {
                 config.lazyLoad = true
-                let modelDir = ModelStorage.snapshotDirectory(for: modelId)
+                let modelDir = explicitLocalDirectory ?? ModelStorage.snapshotDirectory(for: modelId)
                 ExpertStreamingConfig.shared.activate(
                     modelDirectory: modelDir,
                     useDirectIO: {
@@ -436,15 +459,27 @@ public final class InferenceEngine: ObservableObject {
             downloadManager.lastLoadedModelId = modelId
             downloadManager.refresh()
 
-            // Verify integrity to catch incomplete downloads before marking as ready
+            // Verify integrity to catch incomplete downloads before marking as ready.
+            // A local directory was already validated once before load() was ever
+            // called (see ModelManagementView's "Add Local Model…" flow) — no
+            // "delete and re-download" recovery makes sense for a folder outside our
+            // cache, so this re-check exists to catch the same class of problem
+            // (missing/truncated weights) with a message that doesn't imply that.
             setLoadingState(progress: 0.94, stage: "Verifying model files")
-            guard ModelStorage.verifyModelIntegrity(for: modelId) else {
-                throw NSError(domain: "InferenceEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Model safetensors files are incomplete. Please delete and re-download."])
+            let integrityOK = explicitLocalDirectory.map(ModelStorage.validateLocalModelDirectory)
+                ?? ModelStorage.verifyModelIntegrity(for: modelId)
+            guard integrityOK else {
+                let message = explicitLocalDirectory != nil
+                    ? "Model safetensors files are missing or incomplete in this folder."
+                    : "Model safetensors files are incomplete. Please delete and re-download."
+                throw NSError(domain: "InferenceEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
             }
 
             // Read the model's actual max context length from config.json
             setLoadingState(progress: 0.98, stage: "Reading model limits")
-            if let ctxLen = ModelStorage.readMaxContextLength(for: modelId) {
+            let ctxLen = explicitLocalDirectory.map(ModelStorage.readMaxContextLength(inDirectory:))
+                ?? ModelStorage.readMaxContextLength(for: modelId)
+            if let ctxLen {
                 self.maxContextWindow = ctxLen
                 print("[InferenceEngine] Model context window: \(ctxLen) tokens")
             } else {
@@ -459,9 +494,16 @@ public final class InferenceEngine: ObservableObject {
             downloadManager.clearProgress(modelId: modelId)
             state = .error("Failed to load \(modelId): \(error.localizedDescription)")
 
-            // If the model is incomplete/corrupted, flag it so the UI shows the "Delete & Re-download" button
+            // If the model is incomplete/corrupted, flag it so the UI shows the "Delete
+            // & Re-download" button — except for a local directory, where that recovery
+            // makes no sense: there's no repo to re-download from, and "delete" would
+            // silently no-op anyway (ModelStorage.delete only ever resolves paths under
+            // cacheRoot, so an external-drive path never matches anything it would try
+            // to remove). Surface the plain error instead.
             let nsError = error as NSError
-            if nsError.domain == "InferenceEngine" && nsError.code == 1 || Self.isModelCorruptionError(error) {
+            if explicitLocalDirectory == nil,
+                nsError.domain == "InferenceEngine" && nsError.code == 1 || Self.isModelCorruptionError(error)
+            {
                 markModelCorrupted(
                     modelId: modelId,
                     message: "Model weights are corrupted or incomplete. Choose a recovery option."

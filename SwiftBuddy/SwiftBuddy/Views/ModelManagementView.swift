@@ -166,6 +166,16 @@ struct ModelManagementView: View {
                 storageCard
             }
 
+            // A model loaded via "Add Local Model…" never shows up in the
+            // "Models" list below (it was never downloaded into the cache
+            // dm.downloadedModels scans) — without this, there is nowhere in
+            // the app that indicates a local model is the one currently loaded.
+            if let currentLocalModelPath {
+                Section("Current Model (Local)") {
+                    localModelRow(path: currentLocalModelPath)
+                }
+            }
+
             // Individual models
             Section("Models") {
                 ForEach(dm.downloadedModels) { downloaded in
@@ -241,6 +251,63 @@ struct ModelManagementView: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    // MARK: — Local Model Row
+
+    /// The currently-loaded model's path, if it's a local directory not already
+    /// represented in `dm.downloadedModels` (which only ever contains models
+    /// scanned out of the app's own cache).
+    private var currentLocalModelPath: String? {
+        guard case .ready(let modelId) = engine.state,
+            ModelStorage.isLocalDirectoryPath(modelId)
+        else { return nil }
+        return modelId
+    }
+
+    private func localModelRow(path: String) -> some View {
+        let url = URL(filePath: path)
+        return HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(colorForModel(path))
+                    .frame(width: 36, height: 36)
+                Image(systemName: "externaldrive")
+                    .font(.callout)
+                    .foregroundStyle(.white)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text(url.lastPathComponent)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Text("IN USE")
+                        .font(.caption2.weight(.bold))
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(Color.green.opacity(0.15))
+                        .foregroundStyle(.green)
+                        .clipShape(Capsule())
+                }
+                Text(url.deletingLastPathComponent().path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+        }
+        .contextMenu {
+            Button {
+                #if os(macOS)
+                NSWorkspace.shared.open(url)
+                #endif
+            } label: {
+                Label("Show in Finder", systemImage: "folder")
+            }
+            // No "Delete" here, deliberately: this folder isn't in the app's
+            // cache, so there's nothing here for the app to safely remove.
+        }
     }
 
     // MARK: — Model Row

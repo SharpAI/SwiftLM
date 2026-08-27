@@ -112,4 +112,42 @@ final class LocalModelDirectoryTests: XCTestCase {
         try writeConfig(#"{"model_type":"qwen3"}"#)
         XCTAssertNil(ModelStorage.readMaxContextLength(inDirectory: externalDir))
     }
+
+    // MARK: - configIndicatesMoE
+    //
+    // A local directory never matches a ModelCatalog entry (the catalog only
+    // lists HuggingFace ids), so InferenceEngine falls back to this to decide
+    // whether to default SSD expert streaming on — without it, a local MoE
+    // model would silently load with streaming disabled.
+
+    func testConfigIndicatesMoETopLevelNumExperts() {
+        let config: [String: Any] = ["model_type": "qwen3_moe", "num_experts": 128]
+        XCTAssertTrue(ModelStorage.configIndicatesMoE(config))
+    }
+
+    func testConfigIndicatesMoENRoutedExperts() {
+        let config: [String: Any] = ["model_type": "deepseek_v3", "n_routed_experts": 256]
+        XCTAssertTrue(ModelStorage.configIndicatesMoE(config))
+    }
+
+    func testConfigIndicatesMoENestedInTextConfig() {
+        // The common one-level VLM/multimodal wrapper shape.
+        let config: [String: Any] = [
+            "model_type": "qwen3_vl_moe",
+            "text_config": ["num_local_experts": 64],
+        ]
+        XCTAssertTrue(ModelStorage.configIndicatesMoE(config))
+    }
+
+    func testConfigIndicatesMoEFalseForDenseModel() {
+        let config: [String: Any] = ["model_type": "qwen3", "num_hidden_layers": 28]
+        XCTAssertFalse(ModelStorage.configIndicatesMoE(config))
+    }
+
+    func testConfigIndicatesMoEFalseForZeroExpertCount() {
+        // A placeholder/zero value must not be treated as "this is MoE" —
+        // matches ModelProfiler.findExpertCounts' "positive values only" rule.
+        let config: [String: Any] = ["model_type": "qwen3", "num_experts": 0]
+        XCTAssertFalse(ModelStorage.configIndicatesMoE(config))
+    }
 }

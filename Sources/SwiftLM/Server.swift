@@ -438,16 +438,9 @@ struct MLXServer: AsyncParsableCommand {
 
         // ── Load model ──
         var modelConfig: ModelConfiguration
-        let fileManager = FileManager.default
-        if fileManager.fileExists(atPath: modelId) {
-            var isDir: ObjCBool = false
-            fileManager.fileExists(atPath: modelId, isDirectory: &isDir)
-            if isDir.boolValue {
-                print("[SwiftLM] Loading from local directory: \(modelId)")
-                modelConfig = ModelConfiguration(directory: URL(filePath: modelId))
-            } else {
-                modelConfig = ModelConfiguration(id: modelId)
-            }
+        if ModelStorage.isLocalDirectoryPath(modelId) {
+            print("[SwiftLM] Loading from local directory: \(modelId)")
+            modelConfig = ModelConfiguration(directory: URL(filePath: modelId))
         } else if let localDirectory = ModelStorage.validatedContentDirectory(for: modelId) {
             // Any validated copy in the shared HF cache, in any supported layout. Note
             // this deliberately does NOT use localLoadDirectory: that skips the
@@ -1340,8 +1333,7 @@ func resolveModelDirectory(modelId: String) -> URL? {
     let fm = FileManager.default
 
     // Direct local path
-    var isDir: ObjCBool = false
-    if fm.fileExists(atPath: modelId, isDirectory: &isDir), isDir.boolValue {
+    if ModelStorage.isLocalDirectoryPath(modelId) {
         let url = URL(filePath: modelId)
         // Verify config.json exists
         if fm.fileExists(atPath: url.appendingPathComponent("config.json").path) {

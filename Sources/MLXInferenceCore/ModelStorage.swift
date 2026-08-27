@@ -400,6 +400,31 @@ public enum ModelStorage {
         return config
     }
 
+    /// A cheap "does this config declare a Mixture-of-Experts model" check, for
+    /// models with no `ModelCatalog` entry to consult — chiefly local-directory
+    /// models (`isLocalDirectoryPath`), which can never match a catalog id since
+    /// the catalog only lists HuggingFace-style ids.
+    ///
+    /// Checks the same field names `Sources/SwiftLM/ModelProfiler.swift`'s
+    /// `findExpertCounts` looks for (`num_local_experts`/`num_experts`/
+    /// `n_routed_experts`), at the top level and inside `text_config` (the most
+    /// common one-level VLM/multimodal wrapper). `ModelProfiler` itself lives in
+    /// the CLI target and isn't importable from here; this intentionally doesn't
+    /// replicate its full breadth-first nested-wrapper walk — this check only
+    /// needs a yes/no answer for "should SSD expert streaming default on," not
+    /// the exact expert counts, so the common cases are enough.
+    public static func configIndicatesMoE(_ config: [String: Any]) -> Bool {
+        let expertKeys = ["num_local_experts", "num_experts", "n_routed_experts"]
+        func hasExpertCount(_ container: [String: Any]) -> Bool {
+            expertKeys.contains { (container[$0] as? Int).map { $0 > 0 } ?? false }
+        }
+        if hasExpertCount(config) { return true }
+        if let textConfig = config["text_config"] as? [String: Any], hasExpertCount(textConfig) {
+            return true
+        }
+        return false
+    }
+
     // MARK: — Disk Operations
 
     /// Total bytes used by all model files on disk.

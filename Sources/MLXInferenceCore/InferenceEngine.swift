@@ -311,8 +311,26 @@ public final class InferenceEngine: ObservableObject {
         // A path the user pointed the app at directly (e.g. via "Add Local
         // Model…") — never downloaded, never in the HF cache, so the usual
         // verify-or-download flow doesn't apply; go straight to loading it.
+        // Resolved once here (not re-checked inside loadVerifiedModel) so the
+        // answer can't change between this check and that one.
         if ModelStorage.isLocalDirectoryPath(modelId) {
-            await loadVerifiedModel(modelId: modelId)
+            await loadVerifiedModel(modelId: modelId, localDirectory: URL(filePath: modelId))
+            return
+        }
+
+        // A path-shaped modelId (starts with "/") that ISN'T currently a valid
+        // directory — most likely a local model whose directory the app last saw
+        // is now inaccessible (external drive unplugged, folder moved/renamed).
+        // A real HuggingFace repo id is always "org/name" with no leading slash,
+        // so this can't misfire on one. Without this check, `lastLoadedModelId`
+        // persisting a local path and auto-resuming on launch (SwiftBuddyApp)
+        // would fall through to verifyModelIntegrity/downloadThenLoad below and
+        // try to download the raw filesystem path as if it were a repo id.
+        if modelId.hasPrefix("/") {
+            state = .error(
+                "Can't find \"\(URL(filePath: modelId).lastPathComponent)\" — the folder may have "
+                    + "moved or its drive isn't connected."
+            )
             return
         }
 
@@ -351,22 +369,22 @@ public final class InferenceEngine: ObservableObject {
         }
     }
 
-    private func loadVerifiedModel(modelId: String) async {
+    /// - Parameter localDirectory: pre-resolved by `load()` when `modelId` is
+    ///   itself a directory path (e.g. picked via "Add Local Model…", possibly on
+    ///   an external drive entirely outside `cacheRoot`) — `nil` for every normal
+    ///   HuggingFace-id model. Passed in rather than re-derived here so the two
+    ///   checks can't disagree if the path's existence changes in between (the
+    ///   directory is deleted/unmounted between `load()`'s check and this call).
+    ///
+    ///   Distinct from `ModelStorage.localLoadDirectory(for:)` below: that's for
+    ///   an HF-style "org/name" id whose files were copied by hand into a
+    ///   recognised `cacheRoot`-relative layout (issue #110) rather than
+    ///   downloaded, resolved through the existing `ModelStorage` id-based
+    ///   helpers, which still work for that case unchanged.
+    private func loadVerifiedModel(modelId: String, localDirectory: URL? = nil) async {
         setLoadingState(progress: 0.05, stage: "Preparing model configuration")
         currentModelId = modelId
-
-        // Two distinct kinds of "not in the normal cache" model share this function:
-        //  - `isLocalDirectoryPath`: modelId IS the directory (e.g. picked via "Add
-        //    Local Model…", possibly on an external drive entirely outside cacheRoot)
-        //  - `localDirectory`: modelId is still an HF-style "org/name" id, but its
-        //    files were copied by hand into a recognised cacheRoot-relative layout
-        //    (issue #110) rather than downloaded — resolved through the existing
-        //    ModelStorage id-based helpers below, which still work for this case.
-        // Only the first needs its own directory-based helpers throughout this
-        // function; ModelStorage.*(for: modelId) already finds the right directory
-        // for the second, the same way it does for a normally-downloaded model.
-        let explicitLocalDirectory: URL? =
-            ModelStorage.isLocalDirectoryPath(modelId) ? URL(filePath: modelId) : nil
+        let explicitLocalDirectory = localDirectory
 
         do {
             let hub = HubApi(downloadBase: ModelStorage.cacheRoot)
@@ -388,7 +406,21 @@ public final class InferenceEngine: ObservableObject {
             } else {
                 config = ModelConfiguration(id: modelId)
             }
-            let isMoE = ModelCatalog.all.first(where: { $0.id == modelId })?.isMoE ?? false
+            // A local directory never matches a catalog id (the catalog only lists
+            // HuggingFace-style ids) — fall back to inspecting its own config.json
+            // rather than silently defaulting to "not MoE" and disabling SSD expert
+            // streaming for exactly the large-MoE-on-external-drive case this local-
+            // directory support exists for.
+            let isMoE: Bool
+            if let catalogIsMoE = ModelCatalog.all.first(where: { $0.id == modelId })?.isMoE {
+                isMoE = catalogIsMoE
+            } else if let explicitLocalDirectory,
+                let localConfig = ModelStorage.readModelConfig(inDirectory: explicitLocalDirectory)
+            {
+                isMoE = ModelStorage.configIndicatesMoE(localConfig)
+            } else {
+                isMoE = false
+            }
             let generationConfig = GenerationConfig.load()
             if generationConfig.enableMTP {
                 setenv("SWIFTLM_MTP_ENABLE", "1", 1)
@@ -492,18 +524,19 @@ public final class InferenceEngine: ObservableObject {
         } catch {
             ExpertStreamingConfig.shared.deactivate()
             downloadManager.clearProgress(modelId: modelId)
-            state = .error("Failed to load \(modelId): \(error.localizedDescription)")
+            // A local directory's modelId is a full absolute path — show just the
+            // folder name in the error text, matching how "Downloaded" rows
+            // elsewhere in the app already display HF ids trimmed to their last
+            // component, rather than a raw POSIX path that wraps awkwardly in a
+            // narrow error banner.
+            let displayName = explicitLocalDirectory?.lastPathComponent ?? modelId
+            state = .error("Failed to load \(displayName): \(error.localizedDescription)")
 
             // If the model is incomplete/corrupted, flag it so the UI shows the "Delete
-            // & Re-download" button — except for a local directory, where that recovery
-            // makes no sense: there's no repo to re-download from, and "delete" would
-            // silently no-op anyway (ModelStorage.delete only ever resolves paths under
-            // cacheRoot, so an external-drive path never matches anything it would try
-            // to remove). Surface the plain error instead.
+            // & Re-download" button. markModelCorrupted itself no-ops corruptedModelId
+            // for a local directory (see its doc comment) — no guard needed here.
             let nsError = error as NSError
-            if explicitLocalDirectory == nil,
-                nsError.domain == "InferenceEngine" && nsError.code == 1 || Self.isModelCorruptionError(error)
-            {
+            if nsError.domain == "InferenceEngine" && nsError.code == 1 || Self.isModelCorruptionError(error) {
                 markModelCorrupted(
                     modelId: modelId,
                     message: "Model weights are corrupted or incomplete. Choose a recovery option."
@@ -539,11 +572,25 @@ public final class InferenceEngine: ObservableObject {
         state = .loading(progress: min(max(progress, 0), 1), stage: stage)
     }
 
+    /// Flags a model as corrupted so the UI offers "Delete & Re-download" — except
+    /// for a local directory, where that recovery makes no sense: there's no repo
+    /// to re-download from, and delete would silently no-op anyway
+    /// (`ModelStorage.delete` only ever resolves paths under `cacheRoot`, so an
+    /// external-drive path never matches anything it would try to remove). This
+    /// guard lives here, not at each call site, so every current and future
+    /// caller gets it — a per-call-site guard is easy to add to one call and
+    /// forget on the others, which is exactly what happened before this was
+    /// centralized (three generation-time call sites had no guard while the
+    /// load-time one did).
     private func markModelCorrupted(modelId: String?, message: String) {
         let failedModelId = modelId ?? currentModelId
         releaseLoadedModelResources()
         state = .error(message)
-        corruptedModelId = failedModelId
+        if let failedModelId, ModelStorage.isLocalDirectoryPath(failedModelId) {
+            corruptedModelId = nil
+        } else {
+            corruptedModelId = failedModelId
+        }
     }
 
     private static func isModelCorruptionError(_ error: Error) -> Bool {

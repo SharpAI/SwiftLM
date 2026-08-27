@@ -34,7 +34,18 @@ struct SettingsView: View {
 
     private var currentModelIsMoE: Bool {
         guard case .ready(let modelId) = engine.state else { return false }
-        return ModelCatalog.all.first(where: { $0.id == modelId })?.isMoE ?? false
+        if let catalogIsMoE = ModelCatalog.all.first(where: { $0.id == modelId })?.isMoE {
+            return catalogIsMoE
+        }
+        // A local directory never matches a catalog id — fall back to its own
+        // config.json rather than silently reporting "not MoE" (mirrors
+        // InferenceEngine.loadVerifiedModel's identical fallback).
+        if ModelStorage.isLocalDirectoryPath(modelId),
+            let config = ModelStorage.readModelConfig(inDirectory: URL(filePath: modelId))
+        {
+            return ModelStorage.configIndicatesMoE(config)
+        }
+        return false
     }
 
     private var currentModelId: String? {

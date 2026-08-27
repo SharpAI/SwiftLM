@@ -140,6 +140,17 @@ jobs:
           
       - name: Build macOS DMG Wrapper
         run: |
+          # Previously hardcoded 1.0/1 inside generate_xcodeproj.py, so every
+          # release ever built reported the same app version regardless of
+          # which commit produced it. SWIFTBUDDY_BUILD_NUMBER reuses the same
+          # `git rev-list --count HEAD` counter this workflow's bNNN release
+          # tags already use (step "Determine tag name" above), so the app's
+          # build number and its release tag always agree. Marketing version
+          # is date-based (always distinct, no manual "when do we bump this"
+          # decision needed for a pipeline that releases roughly daily).
+          export SWIFTBUDDY_MARKETING_VERSION="$(date -u +%Y.%m.%d)"
+          export SWIFTBUDDY_BUILD_NUMBER="$(git rev-list --count HEAD)"
+          echo "App version: ${SWIFTBUDDY_MARKETING_VERSION} (${SWIFTBUDDY_BUILD_NUMBER})"
           cd SwiftBuddy && python3 generate_xcodeproj.py
           cd ..
           xcodebuild clean build \

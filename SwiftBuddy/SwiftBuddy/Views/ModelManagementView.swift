@@ -10,6 +10,7 @@ struct ModelManagementView: View {
     @State private var showDeleteAll = false
     @State private var showHFSearch = false
     @State private var deletionError: String? = nil
+    @State private var localModelError: String? = nil
 
     @EnvironmentObject private var dm: ModelDownloadManager
 
@@ -58,6 +59,14 @@ struct ModelManagementView: View {
                 Button("OK") { deletionError = nil }
             }, message: {
                 Text(deletionError ?? "")
+            })
+            .alert("Can't Use This Folder", isPresented: Binding(
+                get: { localModelError != nil },
+                set: { if !$0 { localModelError = nil } }
+            ), actions: {
+                Button("OK") { localModelError = nil }
+            }, message: {
+                Text(localModelError ?? "")
             })
             .safeAreaInset(edge: .bottom) {
                 if let (modelId, progress) = dm.activeDownloads.first {
@@ -130,11 +139,41 @@ struct ModelManagementView: View {
                     .padding(.vertical, 4)
                 }
                 .buttonStyle(.plain)
+                #if os(macOS)
+                Button { addLocalModel() } label: {
+                    HStack {
+                        Image(systemName: "folder.badge.plus")
+                            .foregroundStyle(.blue)
+                        Text("Add Local Model…")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+                #endif
+            } footer: {
+                #if os(macOS)
+                Text("Point at a model folder you already have on disk — an external drive, a folder from `hf download --local-dir`, anywhere. It's loaded directly, without copying it into the cache above.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                #endif
             }
-            
+
             // Storage summary card
             Section {
                 storageCard
+            }
+
+            // A model loaded via "Add Local Model…" never shows up in the
+            // "Models" list below (it was never downloaded into the cache
+            // dm.downloadedModels scans) — without this, there is nowhere in
+            // the app that indicates a local model is the one currently loaded.
+            if let currentLocalModelPath {
+                Section("Current Model (Local)") {
+                    localModelRow(path: currentLocalModelPath)
+                }
             }
 
             // Individual models
@@ -212,6 +251,63 @@ struct ModelManagementView: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    // MARK: — Local Model Row
+
+    /// The currently-loaded model's path, if it's a local directory not already
+    /// represented in `dm.downloadedModels` (which only ever contains models
+    /// scanned out of the app's own cache).
+    private var currentLocalModelPath: String? {
+        guard case .ready(let modelId) = engine.state,
+            ModelStorage.isLocalDirectoryPath(modelId)
+        else { return nil }
+        return modelId
+    }
+
+    private func localModelRow(path: String) -> some View {
+        let url = URL(filePath: path)
+        return HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(colorForModel(path))
+                    .frame(width: 36, height: 36)
+                Image(systemName: "externaldrive")
+                    .font(.callout)
+                    .foregroundStyle(.white)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text(url.lastPathComponent)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Text("IN USE")
+                        .font(.caption2.weight(.bold))
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(Color.green.opacity(0.15))
+                        .foregroundStyle(.green)
+                        .clipShape(Capsule())
+                }
+                Text(url.deletingLastPathComponent().path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+        }
+        .contextMenu {
+            Button {
+                #if os(macOS)
+                NSWorkspace.shared.open(url)
+                #endif
+            } label: {
+                Label("Show in Finder", systemImage: "folder")
+            }
+            // No "Delete" here, deliberately: this folder isn't in the app's
+            // cache, so there's nothing here for the app to safely remove.
+        }
     }
 
     // MARK: — Model Row
@@ -320,7 +416,17 @@ struct ModelManagementView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            
+
+            #if os(macOS)
+            Button { addLocalModel() } label: {
+                HStack {
+                    Image(systemName: "folder.badge.plus")
+                    Text("Add Local Model…")
+                }
+            }
+            .buttonStyle(.bordered)
+            #endif
+
             Button("Cancel") { dismiss() }
                 .foregroundStyle(.secondary)
                 .padding(.top, 4)
@@ -329,6 +435,35 @@ struct ModelManagementView: View {
     }
 
     // MARK: — Helpers
+
+    #if os(macOS)
+    /// Lets the user point directly at a model folder that already exists on
+    /// disk — an external drive, a folder from `hf download --local-dir`,
+    /// anywhere — without downloading or copying anything into the app's own
+    /// cache. Validated up front (same weight/config check `InferenceEngine`
+    /// itself would apply) so a bad selection fails here with a clear message
+    /// instead of surfacing as a confusing error partway through loading.
+    private func addLocalModel() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Model Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Add"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        guard ModelStorage.validateLocalModelDirectory(url) else {
+            localModelError =
+                "\(url.lastPathComponent) doesn't look like a model folder — "
+                + "no config.json or safetensors weights were found there."
+            return
+        }
+
+        dismiss()
+        Task { await engine.load(modelId: url.path) }
+    }
+    #endif
 
     private func deleteModel(_ modelId: String) {
         do {

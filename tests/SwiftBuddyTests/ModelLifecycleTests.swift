@@ -63,6 +63,33 @@ final class ModelLifecycleTests: XCTestCase {
         XCTAssertEqual(status2, .requiresFlash)
     }
 
+    // Local-directory model support (issue #160): a modelId that looks like a
+    // path (leading "/") but no longer resolves to a real directory — the drive
+    // was unplugged, or the folder was moved/deleted since the app last saw it.
+    // Before this guard, load() fell through to verifyModelIntegrity/
+    // downloadThenLoad and tried to download the raw filesystem path as if it
+    // were a HuggingFace repo id. This must return a clear, immediate error
+    // instead — critically, without ever reaching the network, so this test
+    // stays fast and hermetic.
+    @MainActor
+    func testLoadWithMissingLocalPathShowsClearErrorWithoutDownloadAttempt() async {
+        let engine = InferenceEngine()
+        let missingPath = "/private/tmp/swiftlm-lifecycle-tests-\(UUID().uuidString)/my-model"
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missingPath))
+
+        await engine.load(modelId: missingPath)
+
+        guard case .error(let message) = engine.state else {
+            return XCTFail("expected .error, got \(engine.state)")
+        }
+        XCTAssertTrue(
+            message.contains("my-model"),
+            "error should name the folder, not just say something generic: \(message)")
+        XCTAssertFalse(
+            message.lowercased().contains("download"),
+            "a missing local path must not be reported as a download failure: \(message)")
+    }
+
     // Feature 15: TurboQuant Footprint Estimates
     func testFeature15_TurboQuantFootprint() {
         let qwen27 = ModelCatalog.all.first { $0.id == "mlx-community/Qwen3.5-27B-4bit" }!

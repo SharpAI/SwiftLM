@@ -198,7 +198,7 @@ jobs:
           ### Download
 
           - **CLI Server**: [macOS Apple Silicon (arm64)](https://github.com/SharpAI/SwiftLM/releases/download/${{ steps.tag.outputs.name }}/SwiftLM-${{ steps.tag.outputs.name }}-macos-arm64.tar.gz)
-          - **GUI Desktop App**: Download the attached `SwiftBuddy-macOS.dmg` below!
+          - **GUI Desktop App**: Download the attached DMG file below!
 
           ### Quick Start
           

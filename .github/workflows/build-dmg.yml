@@ -18,9 +18,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0  # Full history — needed for `git rev-list --count HEAD` (build number)
 
       - name: Generate Xcode Project
         run: |
+          # See generate_xcodeproj.py's header comment: without these, every
+          # build reports the same hardcoded 1.0/1 app version. Matches
+          # release.yml's scheme so ad-hoc and release builds are consistent.
+          export SWIFTBUDDY_MARKETING_VERSION="$(date -u +%Y.%m.%d)"
+          export SWIFTBUDDY_BUILD_NUMBER="$(git rev-list --count HEAD)"
           cd SwiftBuddy && python3 generate_xcodeproj.py
 
       - name: Build Ad-Hoc App

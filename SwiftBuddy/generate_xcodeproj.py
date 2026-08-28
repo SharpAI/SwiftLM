@@ -4,6 +4,20 @@ generate_xcodeproj.py — Generates SwiftBuddy.xcodeproj without xcodegen.
 Includes MLXInferenceCore sources directly + local SPM packages (mlx-swift, mlx-swift-lm).
 Run from the SwiftBuddy/ directory:
     python3 generate_xcodeproj.py
+
+Since this script (not a checked-in Info.plist) regenerates project.pbxproj
+fresh on every build, it's also the single place that controls the app's
+displayed version — MARKETING_VERSION (CFBundleShortVersionString) and
+CURRENT_PROJECT_VERSION (CFBundleVersion) were previously hardcoded to
+"1.0"/"1" here, so every release ever built reported the same version
+regardless of which commit or CI run produced it. Override either via env
+var; both default to the previous hardcoded values for local/manual runs
+where CI hasn't set them:
+    SWIFTBUDDY_MARKETING_VERSION   e.g. "2026.08.27" (release.yml sets this
+                                    to the build date — see that workflow)
+    SWIFTBUDDY_BUILD_NUMBER        e.g. "703" (release.yml sets this to
+                                    `git rev-list --count HEAD`, the same
+                                    counter its bNNN release tags use)
 """
 
 import os, uuid
@@ -11,6 +25,9 @@ from pathlib import Path
 
 def uid():
     return uuid.uuid4().hex[:24].upper()
+
+MARKETING_VERSION = os.environ.get("SWIFTBUDDY_MARKETING_VERSION", "1.0")
+BUILD_NUMBER = os.environ.get("SWIFTBUDDY_BUILD_NUMBER", "1")
 
 # ── UUIDs ─────────────────────────────────────────────────────────────
 PROJ          = uid()
@@ -343,7 +360,7 @@ def pbxproj():
 \t\t\t\tASSTCATALOG_COMPILER_APPICON_NAME = AppIcon;
 \t\t\t\tASSTCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 \t\t\t\tCODE_SIGN_STYLE = Automatic;
-\t\t\t\tCURRENT_PROJECT_VERSION = 1;
+\t\t\t\tCURRENT_PROJECT_VERSION = {BUILD_NUMBER};
 \t\t\t\tGENERATE_INFOPLIST_FILE = YES;
 \t\t\t\tINFOPLIST_KEY_CFBundleDisplayName = "SwiftBuddy Chat";
 \t\t\t\tINFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 SharpAI";
@@ -354,7 +371,7 @@ def pbxproj():
 \t\t\t\tINFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 \t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 17.0;
 \t\t\t\tMACOS_DEPLOYMENT_TARGET = 14.0;
-\t\t\t\tMARKETING_VERSION = 1.0;
+\t\t\t\tMARKETING_VERSION = {MARKETING_VERSION};
 \t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.sharpai.SwiftBuddy;
 \t\t\t\tPRODUCT_NAME = "$(TARGET_NAME)";
 \t\t\t\tSDKROOT = auto;
@@ -371,12 +388,12 @@ def pbxproj():
 \t\t\t\tASSTCATALOG_COMPILER_APPICON_NAME = AppIcon;
 \t\t\t\tASSTCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 \t\t\t\tCODE_SIGN_STYLE = Automatic;
-\t\t\t\tCURRENT_PROJECT_VERSION = 1;
+\t\t\t\tCURRENT_PROJECT_VERSION = {BUILD_NUMBER};
 \t\t\t\tGENERATE_INFOPLIST_FILE = YES;
 \t\t\t\tINFOPLIST_KEY_CFBundleDisplayName = "SwiftBuddy Chat";
 \t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 17.0;
 \t\t\t\tMACOS_DEPLOYMENT_TARGET = 14.0;
-\t\t\t\tMARKETING_VERSION = 1.0;
+\t\t\t\tMARKETING_VERSION = {MARKETING_VERSION};
 \t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.sharpai.SwiftBuddy;
 \t\t\t\tPRODUCT_NAME = "$(TARGET_NAME)";
 \t\t\t\tSDKROOT = auto;

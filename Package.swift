@@ -9,7 +9,8 @@ let package = Package(
         .library(name: "DFlash", targets: ["DFlash"]),
         .executable(name: "SwiftLM", targets: ["SwiftLM"]),
         .executable(name: "SwiftBuddy", targets: ["SwiftBuddy"]),
-        .executable(name: "DFlashKernelBench", targets: ["DFlashKernelBench"])
+        .executable(name: "DFlashKernelBench", targets: ["DFlashKernelBench"]),
+        .executable(name: "Gemma4MTPBench", targets: ["Gemma4MTPBench"])
     ],
     dependencies: [
         // Local Apple MLX Swift fork for C++ extensions
@@ -52,6 +53,18 @@ let package = Package(
                 .product(name: "MLXNN", package: "mlx-swift"),
             ],
             path: "Sources/DFlashKernelBench"
+        ),
+        // ── Gemma4 MTP Speculative Decoding Benchmark ───────────────
+        .executableTarget(
+            name: "Gemma4MTPBench",
+            dependencies: [
+                "MLXInferenceCore",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "Sources/Gemma4MTPBench"
         ),
         // ── STFT Audio Profiling Testing Script (macOS only) ───────────
         .executableTarget(

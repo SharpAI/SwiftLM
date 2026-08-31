@@ -196,12 +196,21 @@ final class ProgressTracker {
 /// duplicated at each call site — this is deliberately the SAME manual
 /// `JSONSerialization` shape the pre-existing `ready` event already used,
 /// not a new encoding convention.
+///
+/// Code-review finding: encoding failure used to be silently swallowed —
+/// for a protocol-critical signal the daemon is meant to positively rely
+/// on (not just infer), a dropped emit with zero diagnostic trail would be
+/// hard to ever notice. Logs to stderr on failure instead.
 func emitEvent(_ payload: [String: Any]) {
-    if let data = try? JSONSerialization.data(withJSONObject: payload),
-       let json = String(data: data, encoding: .utf8) {
-        print(json)
-        fflush(stdout)
+    guard let data = try? JSONSerialization.data(withJSONObject: payload),
+          let json = String(data: data, encoding: .utf8)
+    else {
+        FileHandle.standardError.write(
+            Data("[SwiftLM] failed to encode event for stdout: \(payload)\n".utf8))
+        return
     }
+    print(json)
+    fflush(stdout)
 }
 
 @main
@@ -1055,6 +1064,15 @@ struct MLXServer: AsyncParsableCommand {
         let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         signal(SIGTERM, SIG_IGN)
         signal(SIGINT, SIG_IGN)
+        // Code-review finding: if the daemon's read end of our stdout pipe
+        // is already gone by the time a shutdown signal arrives (e.g. the
+        // daemon itself already crashed), the exiting-event print()/fflush
+        // below can raise SIGPIPE — whose default disposition kills this
+        // process via signal instead of reaching Darwin.exit(0), producing
+        // exactly the ambiguous "was this a crash?" signature this feature
+        // exists to eliminate. Ignore SIGPIPE so a closed pipe surfaces as
+        // an ordinary EPIPE write error instead.
+        signal(SIGPIPE, SIG_IGN)
 
         shutdownSource.setEventHandler {
             print("\n[SwiftLM] Received SIGTERM, shutting down gracefully...")

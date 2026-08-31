@@ -47,6 +47,30 @@ The server will emit a machine-readable JSON ready event on stdout when it is re
 
 Aegis-AI should **wait for this event** before routing any requests to the server.
 
+The server also emits a machine-readable JSON `exiting` event on stdout
+when it receives SIGTERM/SIGINT:
+
+```json
+{"event":"exiting","reason":"requested"}
+```
+
+`reason: "requested"` means *some* SIGTERM/SIGINT was delivered — it does
+not distinguish who sent it. The common case is Aegis-AI calling `stop`,
+but a manual `kill`/`pkill` or an external process manager produces the
+identical event; don't treat `requested` as proof the daemon itself
+initiated the shutdown.
+
+This event is **best-effort, not guaranteed**: it's emitted from a signal
+handler dispatched on the main queue, so if the main queue is busy (e.g.
+mid-request) when the signal arrives, emission is delayed until the queue
+frees up — it is not synchronous at signal-delivery time. A consumer that
+times out waiting for it and force-kills the process should not treat the
+absence of this event as proof the shutdown wasn't requested.
+
+This is the first of what may grow into a small set of self-reported exit
+reasons; consumers should ignore any `reason` value they don't recognize
+rather than treat it as an error.
+
 ---
 
 ## 🧠 Running 122B+ MoE Models (Critical)

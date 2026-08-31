@@ -47,6 +47,18 @@ The server will emit a machine-readable JSON ready event on stdout when it is re
 
 Aegis-AI should **wait for this event** before routing any requests to the server.
 
+The server also emits a machine-readable JSON `exiting` event on stdout
+before a clean, planned shutdown (SIGTERM/SIGINT):
+
+```json
+{"event":"exiting","reason":"requested"}
+```
+
+`reason: "requested"` means this shutdown was expected (e.g. Aegis-AI
+called `stop`) — not a crash. This is the first of what may grow into a
+small set of self-reported exit reasons; consumers should ignore any
+`reason` value they don't recognize rather than treat it as an error.
+
 ---
 
 ## 🧠 Running 122B+ MoE Models (Critical)

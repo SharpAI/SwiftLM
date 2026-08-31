@@ -189,6 +189,21 @@ final class ProgressTracker {
     }
 }
 
+/// Emit one machine-readable JSON-lines event on stdout for the Aegis-AI
+/// daemon to consume (`docs/AEGIS_INTEGRATION.md`, and the daemon's own
+/// `daemon/spec/engine-protocol.md`). Shared by the `ready` event and the
+/// `exiting` event so the JSON-encode-and-flush boilerplate isn't
+/// duplicated at each call site — this is deliberately the SAME manual
+/// `JSONSerialization` shape the pre-existing `ready` event already used,
+/// not a new encoding convention.
+func emitEvent(_ payload: [String: Any]) {
+    if let data = try? JSONSerialization.data(withJSONObject: payload),
+       let json = String(data: data, encoding: .utf8) {
+        print(json)
+        fflush(stdout)
+    }
+}
+
 @main
 struct MLXServer: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -1026,13 +1041,16 @@ struct MLXServer: AsyncParsableCommand {
             }
             readyEvent["partition"] = info
         }
-        if let data = try? JSONSerialization.data(withJSONObject: readyEvent),
-           let json = String(data: data, encoding: .utf8) {
-            print(json)
-            fflush(stdout)
-        }
+        emitEvent(readyEvent)
 
         // ── Graceful shutdown on SIGTERM/SIGINT ──
+        // Engine Protocol v1 (`daemon/spec/engine-protocol.md` §3, TD-7):
+        // emit `exiting{reason:"requested"}` before exiting so the daemon
+        // can tell a planned, no-error stop apart from a real failure —
+        // `requested` has no `ExitClassification` equivalent on the daemon
+        // side (a daemon-requested stop never reaches that classifier at
+        // all), it exists purely for the daemon to positively confirm this
+        // was a clean shutdown, not infer it from absence of other signals.
         let shutdownSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         signal(SIGTERM, SIG_IGN)
@@ -1040,10 +1058,12 @@ struct MLXServer: AsyncParsableCommand {
 
         shutdownSource.setEventHandler {
             print("\n[SwiftLM] Received SIGTERM, shutting down gracefully...")
+            emitEvent(["event": "exiting", "reason": "requested"])
             Darwin.exit(0)
         }
         interruptSource.setEventHandler {
             print("\n[SwiftLM] Received SIGINT, shutting down gracefully...")
+            emitEvent(["event": "exiting", "reason": "requested"])
             Darwin.exit(0)
         }
         shutdownSource.resume()

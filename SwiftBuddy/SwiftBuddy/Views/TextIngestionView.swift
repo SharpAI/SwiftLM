@@ -1,7 +1,5 @@
 import SwiftUI
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 struct TextIngestionView: View {
     @Environment(\.dismiss) private var dismiss

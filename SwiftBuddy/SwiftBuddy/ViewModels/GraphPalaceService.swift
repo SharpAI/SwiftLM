@@ -1,9 +1,7 @@
 // GraphPalaceService.swift - Synaptic Synthesis Engine
 import SwiftUI
 import SwiftData
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 @MainActor
 public final class GraphPalaceService {

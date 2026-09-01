@@ -1,9 +1,7 @@
 // SettingsView.swift — Full SwiftLM parameter dashboard + console log (iOS tab or macOS sheet)
 import Observation
 import SwiftUI
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 struct SettingsView: View {
     @ObservedObject var viewModel: ChatViewModel

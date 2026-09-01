@@ -1,8 +1,6 @@
 // ModelPickerView.swift — Model selection with HuggingFace live search
 import SwiftUI
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 // MARK: — Main Picker View
 

@@ -1,7 +1,5 @@
 import SwiftUI
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 import SwiftData
 
 struct InspectorView: View {

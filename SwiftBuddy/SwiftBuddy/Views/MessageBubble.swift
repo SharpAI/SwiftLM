@@ -1,8 +1,6 @@
 // MessageBubble.swift — Premium chat message bubbles (iOS + macOS)
 import SwiftUI
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MARK: — Static Message Bubble

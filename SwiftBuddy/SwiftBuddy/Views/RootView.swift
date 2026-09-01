@@ -1,9 +1,7 @@
 // RootView.swift — Adaptive root layout: tab bar on iOS, sidebar on macOS
 import SwiftUI
 import SwiftData
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 struct RootView: View {
     @EnvironmentObject private var engine: InferenceEngine

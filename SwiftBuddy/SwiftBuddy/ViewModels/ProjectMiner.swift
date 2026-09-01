@@ -1,7 +1,5 @@
 import Foundation
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 @MainActor
 public final class ProjectMiner: ObservableObject {
@@ -22,7 +20,6 @@ public final class ProjectMiner: ObservableObject {
     
     private init() {}
     
-    #if canImport(MLXInferenceCore)
     /// Recursively mines a directory, chunks large files, and sequentially prompts the ExtractionService
     public func mineDirectory(url: URL, wingName: String, engine: InferenceEngine) async {
         guard !isMining else { return }
@@ -91,7 +88,6 @@ public final class ProjectMiner: ObservableObject {
         status = "Mining Complete. Ingested \(validFiles.count) files."
         isMining = false
     }
-    #endif
     
     /// Basic semantic chunking: splits by newline to preserve paragraph/code structure but caps size
     internal func chunkBySentences(text: String, maxChars: Int) -> [String] {

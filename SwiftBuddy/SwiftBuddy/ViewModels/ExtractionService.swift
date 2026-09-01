@@ -1,8 +1,6 @@
 import Foundation
 import SwiftData
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 struct ExtractedMemory: Codable {
     let room: String

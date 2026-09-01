@@ -1,8 +1,6 @@
 import SwiftUI
 import SwiftData
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 struct PersonaDiscoveryView: View {
     @ObservedObject var registry: RegistryService

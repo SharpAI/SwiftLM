@@ -2,9 +2,7 @@ import Foundation
 import HTTPTypes
 import Hummingbird
 import NIOCore
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 struct ServerStartupConfiguration: Codable, Equatable, Sendable {
     var autoStart: Bool = true

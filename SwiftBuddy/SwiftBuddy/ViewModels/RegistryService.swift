@@ -1,8 +1,6 @@
 import Foundation
 import SwiftData
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 struct GithubNode: Codable, Identifiable {
     var id: String { name }
@@ -156,7 +154,6 @@ public final class RegistryService: ObservableObject {
             // Phase 2 Extraction: Vector-Driven Persona Synthesis
             do {
                 if let engine = engine {
-#if canImport(MLXInferenceCore)
                     try await MemoryPalaceService.shared.synthesizePersonaIndex(wingName: friendlyName, using: engine) { [weak self] (current: Int, total: Int, text: String) in
                         Task { @MainActor in
                             self?.extractionPhase = text
@@ -165,7 +162,6 @@ public final class RegistryService: ObservableObject {
                             self?.currentChunkText = ""
                         }
                     }
-#endif
                 } else {
                     print("[RegistryService] WARNING: Engine not injected. Persona Synthesis bypassed.")
                 }

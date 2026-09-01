@@ -2,9 +2,7 @@ import Foundation
 import SwiftData
 import NaturalLanguage
 
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 @MainActor
 final class MemoryPalaceService {
@@ -138,7 +136,6 @@ final class MemoryPalaceService {
         return savedCount
     }
     
-#if canImport(MLXInferenceCore)
     public func synthesizePersonaIndex(wingName: String, using engine: InferenceEngine, onProgress: ((Int, Int, String) -> Void)? = nil) async throws {
         onProgress?(1, 1, "EXTRACTING CORE IDENTITIES VIA VECTOR MATCHING...")
         
@@ -198,7 +195,6 @@ final class MemoryPalaceService {
         try saveMemory(wingName: wingName, roomName: "persona_index", text: response.trimmingCharacters(in: .whitespacesAndNewlines), type: "hall_facts")
         print("[MemoryPalace] 🧠 Vector-Driven Persona Index Generated & Saved.")
     }
-#endif
     
     func searchMemories(query: String, wingName: String, roomName: String? = nil, hallType: String? = nil, topK: Int = 5) throws -> [MemoryEntry] {
         guard let context = modelContext else { throw URLError(.badServerResponse) }

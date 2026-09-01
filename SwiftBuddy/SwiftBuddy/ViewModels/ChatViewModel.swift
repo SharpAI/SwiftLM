@@ -2,9 +2,7 @@
 import SwiftUI
 import Combine
 import SwiftData
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 @MainActor
 final class ChatViewModel: ObservableObject {

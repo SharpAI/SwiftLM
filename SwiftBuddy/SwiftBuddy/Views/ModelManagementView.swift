@@ -1,8 +1,6 @@
 // ModelManagementView.swift — Disk usage overview and model deletion
 import SwiftUI
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 struct ModelManagementView: View {
     @EnvironmentObject private var engine: InferenceEngine

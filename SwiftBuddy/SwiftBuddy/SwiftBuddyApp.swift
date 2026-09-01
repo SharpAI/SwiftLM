@@ -1,9 +1,7 @@
 // SwiftBuddyApp.swift — App entry point (iOS + macOS)
 import SwiftUI
 import SwiftData
-#if canImport(MLXInferenceCore)
 import MLXInferenceCore
-#endif
 
 // MARK: — Appearance Store (persists dark/light/system preference)
 

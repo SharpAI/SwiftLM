@@ -22,6 +22,7 @@ import MLXLMCommon
 import MLXNN
 import MLXVLM
 import MLXInferenceCore
+import NIOCore
 import Tokenizers
 
 extension LMInput: @retroactive @unchecked Sendable {}
@@ -331,6 +332,66 @@ func emitEvent(_ payload: [String: Any]) {
     fflush(stdout)
 }
 
+/// Where `run()` is when it throws, so `classifyExitReason` can produce a more
+/// precise `reason` than "something failed" and `detail` can name which load
+/// stalled. Set immediately before each fallible stage begins; read only if
+/// that stage (or something after it and before the next `phase =` update)
+/// throws.
+enum LoadPhase: String {
+    case startup
+    case architectureProbe
+    case mainModelLoad
+    case draftModelLoad
+    case mtpAssistantLoad
+    case chatTemplateProbe
+    case portBind
+}
+
+/// Maps a thrown error (plus the `LoadPhase` it happened in) to one of the
+/// daemon's closed snake_case `reason` values (`daemon/spec/engine-protocol.md`
+/// in the Aegis-AI repo). Unrecognized/unclassifiable failures fall back to
+/// `binary_error` rather than inventing a new reason string, since the daemon
+/// treats the set as closed and ignores values it doesn't recognize.
+func classifyExitReason(_ error: Error, phase: LoadPhase) -> String {
+    // Port bind failures surface as NIOCore.IOError wrapping the bind() errno.
+    // EADDRINUSE is the case Aegis-AI's daemon cares about distinguishing (it
+    // means "something else already owns this port", not a SwiftLM defect).
+    if phase == .portBind {
+        if let ioError = error as? IOError, ioError.errnoCode == EADDRINUSE {
+            return "port_conflict"
+        }
+        // Any other error thrown while binding is still a bind-phase failure,
+        // not a model-load one — fall through to the generic classification
+        // below rather than mislabeling it model_load_failed.
+    }
+
+    // A malformed chat_template.jinja is a model artifact defect, not a binary
+    // defect — bucket it (and every other failure raised while a model/probe
+    // was loading) under model_load_failed.
+    if error is MalformedChatTemplate {
+        return "model_load_failed"
+    }
+    switch phase {
+    case .architectureProbe, .mainModelLoad, .draftModelLoad, .mtpAssistantLoad,
+        .chatTemplateProbe:
+        return "model_load_failed"
+    default:
+        break
+    }
+
+    // MLX/Metal allocation failures don't have a dedicated Swift error type in
+    // mlx-swift (uncaught MLX errors call fatalError directly, which is out of
+    // scope here — see AEGIS_INTEGRATION.md). When one does reach us as a
+    // thrown Swift error, it's identifiable only by message text.
+    let message = String(describing: error).lowercased()
+    if message.contains("out of memory") || message.contains("cannot allocate")
+        || message.contains("enomem") || message.contains("bad_alloc") {
+        return "out_of_memory"
+    }
+
+    return "binary_error"
+}
+
 @main
 struct MLXServer: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -431,7 +492,29 @@ struct MLXServer: AsyncParsableCommand {
     @Option(name: .long, help: "Assistant checkpoint providing MTP heads, for model families that ship them separately instead of in the main checkpoint (Gemma 4). Ignored when the main model carries its own MTP heads (Qwen3.5, DeepSeek V4).")
     var mtpAssistantModel: String?
 
+    /// Entry point. Delegates to `runInner`, then — on any thrown error, at any
+    /// stage — self-reports it as an `exiting` event before rethrowing, so
+    /// process exit status is unchanged but the daemon gets a positive signal
+    /// instead of having to infer failure cause from an empty pipe.
+    /// `reason: "requested"` (the SIGTERM/SIGINT path, below in `runInner`)
+    /// already had its own emit before this task; this handles every other
+    /// exit path — see `docs/AEGIS_INTEGRATION.md` for the full reason list.
     mutating func run() async throws {
+        var phase = LoadPhase.startup
+        do {
+            try await runInner(phase: &phase)
+        } catch {
+            let reason = classifyExitReason(error, phase: phase)
+            emitEvent([
+                "event": "exiting",
+                "reason": reason,
+                "detail": String(describing: error),
+            ])
+            throw error
+        }
+    }
+
+    private mutating func runInner(phase: inout LoadPhase) async throws {
         // Raise the open-file limit: large sharded models (e.g. Kimi K2.5, 182 safetensor
         // shards) + draft model + metallib + dylibs can exhaust the default macOS FD limit of 256.
         var rl = rlimit()
@@ -714,6 +797,7 @@ struct MLXServer: AsyncParsableCommand {
             .appendingPathComponent("HuggingFace", isDirectory: true)
         let hub = HubApi(downloadBase: cacheRoot)
         let downloader = HubDownloader(hub: hub)
+        phase = .architectureProbe
         let architecture = try await ModelArchitectureProbe.inspect(
             configuration: modelConfig,
             downloader: downloader
@@ -756,6 +840,7 @@ struct MLXServer: AsyncParsableCommand {
         let tracker = ProgressTracker(modelId: resolvedModelId)
         
         let isAudio = self.audio
+        phase = .mainModelLoad
         if isVision && isAudio {
             print("[SwiftLM] Loading Omni-Language Model (Text + Vision + Audio)...")
             container = try await OmniModelFactory.shared.loadContainer(
@@ -834,6 +919,7 @@ struct MLXServer: AsyncParsableCommand {
                 draftConfig.lazyLoad = true
             }
             let draftDownloader = HubDownloader(hub: HubApi(downloadBase: cacheRoot))
+            phase = .draftModelLoad
             let draftContainer = try await LLMModelFactory.shared.loadContainer(
                 from: draftDownloader,
                 using: TransformersTokenizerLoader(modelId: resolvedModelId),
@@ -869,6 +955,7 @@ struct MLXServer: AsyncParsableCommand {
             }
             if self.streamExperts { assistantConfig.lazyLoad = true }
             let assistantDownloader = HubDownloader(hub: HubApi(downloadBase: cacheRoot))
+            phase = .mtpAssistantLoad
             let assistantContainer = try await LLMModelFactory.shared.loadContainer(
                 from: assistantDownloader,
                 using: TransformersTokenizerLoader(modelId: resolvedModelId),
@@ -1009,6 +1096,7 @@ struct MLXServer: AsyncParsableCommand {
         // A model with no chat template at all is a different and legitimate case (base
         // models ship without one, and /v1/completions does not need it), so that is
         // passed over rather than treated as a defect.
+        phase = .chatTemplateProbe
         do {
             let probeTokenizer = await container.tokenizer
             // Shaped like the simplest real request rather than a bare minimum: one user
@@ -1319,6 +1407,7 @@ struct MLXServer: AsyncParsableCommand {
         shutdownSource.resume()
         interruptSource.resume()
 
+        phase = .portBind
         try await app.runService()
     }
 }

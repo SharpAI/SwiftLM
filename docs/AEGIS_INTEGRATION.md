@@ -71,6 +71,30 @@ This is the first of what may grow into a small set of self-reported exit
 reasons; consumers should ignore any `reason` value they don't recognize
 rather than treat it as an error.
 
+Beyond a clean SIGTERM/SIGINT shutdown, `run()` also wraps its startup and
+model-load path in a single top-level `catch`: any error thrown before the
+server is serving requests is self-reported the same way and then rethrown
+(process exit status is unchanged). The `reason` is one of:
+
+| `reason` | Meaning |
+|---|---|
+| `requested` | Clean shutdown — SIGTERM/SIGINT was delivered (see above). |
+| `port_conflict` | `--port` is already bound by another process (`EADDRINUSE`). |
+| `model_load_failed` | The main model, a `--draft-model`, an `--mtp-assistant-model`, the architecture probe, or the chat-template probe failed to load/parse — most commonly a bad model ID/path, a corrupt or incompatible checkpoint, or (for the template probe) a malformed `chat_template.jinja`. |
+| `out_of_memory` | An allocation failure was identifiable from the thrown error. Most MLX/Metal allocation failures instead terminate the process directly (`fatalError`) without going through this path, so absence of this reason is not proof memory pressure wasn't the cause — see the crash log in that case. |
+| `binary_error` | Any other error caught at the top level — the catch-all when a failure doesn't match one of the more specific reasons above. |
+
+Every non-`requested` event also carries a `detail` field with a short,
+human-readable description of the underlying error, e.g.:
+
+```json
+{"event":"exiting","reason":"port_conflict","detail":"bind(descriptor:ptr:bytes:) failed: Address already in use (errno: 48)"}
+{"event":"exiting","reason":"model_load_failed","detail":"..."}
+```
+
+`detail` is diagnostic text for logs, not a stable machine-readable value —
+consumers should match on `reason` only.
+
 ---
 
 ## 🧠 Running 122B+ MoE Models (Critical)

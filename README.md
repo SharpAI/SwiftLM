@@ -86,7 +86,7 @@ The first SwiftLM numbers from a **32 GB** Mac. Every other table in this README
 | ~39.7K | 757 / 31.0 | 53.3 s | 17.9 GB · 0 |
 | ~80.7K | 622 / 24.3 | 131.3 s | 19.5 GB · 0 |
 
-Every needle check passed. `--mtp` with the bf16 assistant (`gemma-4-26B-A4B-it-assistant-bf16`) works but is slower on the M6: 45.2 / 35.6 / 30.4 tok/s decode at ~530 / 2.3K / 9.5K tokens, against 53.0 / 50.8 / 46.0 without it. A 4-bit MoE is compute-bound, so verifying the drafted tokens costs more than it saves (the same finding as the M5 Pro tables below).
+Every needle check passed. `--mtp` with the bf16 assistant (`gemma-4-26B-A4B-it-assistant-bf16`) works but is slower on the M6: 45.2 / 35.6 / 30.4 tok/s decode at ~530 / 2.3K / 9.5K tokens, against 53.0 / 50.8 / 46.0 without it. A 4-bit MoE is compute-bound, so verifying the drafted tokens costs more than it saves (the same finding as the M5 Pro tables below). ⚠️ `--mtp` also currently changes the output at temperature 0: once the context passes Gemma's 1,024-token sliding window, rejected drafts aren't rolled back ([#184](https://github.com/SharpAI/SwiftLM/issues/184)). Avoid it until that's fixed.
 
 ### Qwen3.6-35B-A3B 4-bit — GPU vs SSD streaming
 

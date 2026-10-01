@@ -206,28 +206,18 @@ final class PromptCacheTests: XCTestCase {
 
     // MARK: - Group 3: Decision branch ordering (pure logic tests)
 
-    /// PR #85 fix 6: skipPromptCache must be true when multimodal.
-    func testSkipPromptCache_Multimodal() {
-        let isMultimodalRequest = true
-        let kvBits: Int? = nil
-        let skipPromptCache = isMultimodalRequest || kvBits != nil
-        XCTAssertTrue(skipPromptCache, "Multimodal request -> must skip prompt cache")
-    }
-
-    /// PR #85 fix 6: skipPromptCache must be true when kv_bits is set.
-    func testSkipPromptCache_KvBits() {
-        let isMultimodalRequest = false
-        let kvBits: Int? = 4
-        let skipPromptCache = isMultimodalRequest || kvBits != nil
-        XCTAssertTrue(skipPromptCache, "kv_bits set -> must skip prompt cache (format mismatch)")
-    }
-
-    /// Neither multimodal nor kv_bits -> should NOT skip.
-    func testSkipPromptCache_Standard_DoesNotSkip() {
-        let isMultimodalRequest = false
-        let kvBits: Int? = nil
-        let skipPromptCache = isMultimodalRequest || kvBits != nil
-        XCTAssertFalse(skipPromptCache, "Standard text request -> should attempt cache")
+    /// PR #85 fix 6 / #200: the real skip predicate, as a matrix.
+    func testSkipPromptCache_Matrix() {
+        func skip(mm: Bool = false, kv: Bool = false, vlm: Bool = false, safe: Bool = false) -> Bool {
+            shouldSkipPromptCache(
+                isMultimodalRequest: mm, kvBitsSet: kv, isVLM: vlm, vlmTextCacheSafe: safe)
+        }
+        XCTAssertTrue(skip(mm: true), "multimodal request -> skip")
+        XCTAssertTrue(skip(mm: true, vlm: true, safe: true), "image/audio on Gemma 4 -> still skip")
+        XCTAssertTrue(skip(kv: true), "kv_bits set -> skip (format mismatch)")
+        XCTAssertFalse(skip(), "plain text LLM -> use the cache")
+        XCTAssertTrue(skip(vlm: true), "VLM without a stateless text path (Qwen-VL) -> skip")
+        XCTAssertFalse(skip(vlm: true, safe: true), "Gemma 4 VLM text request -> use the cache (#200)")
     }
 
     /// PR #85 fix 5: spec-decode must be checked BEFORE prompt cache.

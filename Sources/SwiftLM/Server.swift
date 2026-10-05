@@ -1827,12 +1827,26 @@ actor ServerStats {
 
 
 
+/// Recurrent (MambaCache) layer state captured after `position` prompt tokens, keyed by
+/// layer index. Recurrent state cannot be rewound, so a hybrid prompt that diverges from a
+/// cached one resumes from the last checkpoint before the divergence instead of from zero.
+struct RecurrentCheckpoint {
+    let position: Int
+    let layers: [Int: [MLXArray]]
+}
+
 actor PromptCache {
     struct CachedState {
         let tokens: [Int]            // Full token sequence that generated this KV state
         let states: [[MLXArray]]     // Per-layer KV state arrays
         let metaStates: [[String]]   // Per-layer metadata
+        /// Hybrid entries only: earlier recurrent states, ascending by position, each
+        /// strictly before `tokens.count` (the entry's own state covers that one).
+        var checkpoints: [RecurrentCheckpoint] = []
     }
+
+    /// Most checkpoints kept per entry; each holds one small recurrent state per layer.
+    static let maxCheckpoints = 4
 
     /// Most recently used first. Holds at most `maxEntries`.
     private var entries: [CachedState] = []
@@ -1927,7 +1941,14 @@ actor PromptCache {
     /// state is only valid if captured at exactly `tokens.count`, which the generic
     /// post-first-token save cannot guarantee. Only the hybrid path (which snapshots at
     /// a known boundary) passes true.
-    func save(tokens: [Int], cache: [KVCache], allowRecurrent: Bool = false) {
+    ///
+    /// `checkpoints` are the recurrent states captured while prefilling this prompt;
+    /// `resumedFrom` is how many tokens a restore supplied, so the entry that supplied them
+    /// passes its own checkpoints (and, for an exact hit, its end state) on to this one.
+    func save(
+        tokens: [Int], cache: [KVCache], allowRecurrent: Bool = false,
+        checkpoints: [RecurrentCheckpoint] = [], resumedFrom: Int = 0
+    ) {
         if !allowRecurrent, cache.contains(where: { $0 is MambaCache }) {
             return
         }
@@ -1965,11 +1986,62 @@ actor PromptCache {
         // being compared. The near-prefix rule needs a state that restores at any prefix.
         let exactPrefixOnly = allowRecurrent
             || !Self.canRewindToAnyPrefix(cache: cache, metaStates: metaStates)
+        // Read the resumed-from entry before the removal below drops it.
+        let carried = allowRecurrent
+            ? inheritedCheckpoints(tokens: tokens, resumedFrom: resumedFrom, cache: cache) : []
+        let merged = Self.mergedCheckpoints(carried + checkpoints, before: P)
         entries.removeAll {
             Self.isSuperseded($0.tokens, by: tokens, exactPrefixOnly: exactPrefixOnly)
         }
-        entries.insert(CachedState(tokens: tokens, states: states, metaStates: metaStates), at: 0)
+        entries.insert(
+            CachedState(tokens: tokens, states: states, metaStates: metaStates, checkpoints: merged),
+            at: 0)
         if entries.count > maxEntries { entries.removeLast(entries.count - maxEntries) }
+    }
+
+    /// Checkpoints of the entry a restore resumed from, up to `resumedFrom`, plus that
+    /// entry's end state when the restore took all of it. Both are valid for `tokens`
+    /// because they lie inside the prefix it shares with the entry.
+    private func inheritedCheckpoints(
+        tokens: [Int], resumedFrom: Int, cache: [KVCache]
+    ) -> [RecurrentCheckpoint] {
+        guard resumedFrom > 0,
+              let source = entries.first(where: {
+                  Self.commonPrefixLength($0.tokens, tokens) >= resumedFrom
+                      && $0.states.count == cache.count
+              })
+        else { return [] }
+        var inherited = source.checkpoints.filter { $0.position <= resumedFrom }
+        if source.tokens.count == resumedFrom {
+            var layers: [Int: [MLXArray]] = [:]
+            for (i, layer) in cache.enumerated() where layer is MambaCache {
+                layers[i] = source.states[i]
+            }
+            inherited.append(RecurrentCheckpoint(position: resumedFrom, layers: layers))
+        }
+        return inherited
+    }
+
+    /// Ascending, deduplicated checkpoints strictly before `end`, thinned to
+    /// `maxCheckpoints`. The first (the anchor after the system prompt) and the newest are
+    /// kept; otherwise the checkpoint closest to a neighbour goes, so the spread stays even.
+    static func mergedCheckpoints(_ all: [RecurrentCheckpoint], before end: Int) -> [RecurrentCheckpoint] {
+        var out: [RecurrentCheckpoint] = []
+        for cp in all.sorted(by: { $0.position < $1.position })
+        where cp.position > 0 && cp.position < end && cp.position != out.last?.position {
+            out.append(cp)
+        }
+        while out.count > maxCheckpoints {
+            let drop = (1..<out.count - 1).min {
+                Self.gap(out, $0) < Self.gap(out, $1)
+            } ?? 1
+            out.remove(at: drop)
+        }
+        return out
+    }
+
+    private static func gap(_ cps: [RecurrentCheckpoint], _ i: Int) -> Int {
+        min(cps[i].position - cps[i - 1].position, cps[i + 1].position - cps[i].position)
     }
 
     /// Drop cached entries under memory pressure: all of them, or all but the most recent.
@@ -2072,18 +2144,19 @@ actor PromptCache {
 
     /// Hybrid-model restore. Recurrent state cannot be trimmed, only resumed, so a cached
     /// sequence is reusable only if it is an exact prefix of `newTokens` no longer than
-    /// `limit`; the longest such entry wins. Returns the cached length (tokens now in
+    /// `limit`, or (when the prompt diverges from it) if it holds a recurrent checkpoint at
+    /// or before the divergence and the attention layers can be rewound to that point. The
+    /// entry that resumes the most tokens wins. Returns the resumed length (tokens now in
     /// `cache`), or nil on a miss.
     func restoreExactPrefix(newTokens: [Int], limit: Int, into cache: [KVCache]) -> Int? {
-        // Longest exact-prefix entry wins.
-        guard let index = entries.indices
-            .filter({ i in
-                let e = entries[i]
-                return !e.tokens.isEmpty && e.tokens.count <= limit
-                    && e.states.count == cache.count && newTokens.starts(with: e.tokens)
-            })
-            .max(by: { entries[$0].tokens.count < entries[$1].tokens.count })
-        else {
+        var best: (index: Int, length: Int, checkpoint: RecurrentCheckpoint?)?
+        for (i, e) in entries.enumerated() {
+            guard let r = hybridResumePoint(e, newTokens: newTokens, limit: limit, cache: cache),
+                  r.length > (best?.length ?? 0)
+            else { continue }
+            best = (i, r.length, r.checkpoint)
+        }
+        guard let (index, length, checkpoint) = best else {
             misses += 1
             return nil
         }
@@ -2095,9 +2168,53 @@ actor PromptCache {
             // ArraysCache's metaState setter traps; it carries no metadata to restore.
             if !(layer is MambaCache) { layer.metaState = cached.metaStates[i] }
         }
+        if let checkpoint {
+            // Recurrent layers jump back to the checkpoint; attention layers drop the
+            // positions after it (`hybridResumePoint` checked they can).
+            for (i, state) in checkpoint.layers {
+                var layer = cache[i]
+                layer.state = state.map(detachedArray)
+            }
+            for layer in cache where !(layer is MambaCache) {
+                layer.trim(cached.tokens.count - length)
+            }
+        }
         hits += 1
-        print("[SwiftLM] \u{1F5C2} Prompt cache HIT (hybrid): \(cached.tokens.count)/\(newTokens.count) tokens reused")
-        return cached.tokens.count
+        print("[SwiftLM] \u{1F5C2} Prompt cache HIT (hybrid): \(length)/\(newTokens.count) tokens reused"
+            + (checkpoint == nil ? "" : " (checkpoint of \(cached.tokens.count))"))
+        return length
+    }
+
+    /// How many tokens of `entry` a hybrid restore can resume, and the checkpoint to
+    /// resume from when that is short of the whole entry. Nil when it cannot.
+    private func hybridResumePoint(
+        _ entry: CachedState, newTokens: [Int], limit: Int, cache: [KVCache]
+    ) -> (length: Int, checkpoint: RecurrentCheckpoint?)? {
+        guard !entry.tokens.isEmpty, entry.states.count == cache.count else { return nil }
+        if entry.tokens.count <= limit, newTokens.starts(with: entry.tokens) {
+            return (entry.tokens.count, nil)
+        }
+        // Diverged (or longer than `limit`): the newest checkpoint inside the shared prefix.
+        let reach = min(Self.commonPrefixLength(entry.tokens, newTokens), limit)
+        guard let cp = entry.checkpoints.last(where: { $0.position <= reach }),
+              canRewindAttention(entry, cache: cache)
+        else { return nil }
+        return (cp.position, cp)
+    }
+
+    /// Whether every non-recurrent layer of `entry` can be trimmed exactly: a plain KV
+    /// cache always can; a sliding-window ring only until it fills (the same predicate as
+    /// `RotatingKVCache.isTrimmable(after:)`, read from the saved metaState because the
+    /// live cache has not been restored yet).
+    private func canRewindAttention(_ entry: CachedState, cache: [KVCache]) -> Bool {
+        for (i, layer) in cache.enumerated() {
+            if layer is MambaCache || type(of: layer) == KVCacheSimple.self { continue }
+            guard layer is RotatingKVCache, entry.metaStates[i].count > 3,
+                  let maxSize = Int(entry.metaStates[i][1]), let offset = Int(entry.metaStates[i][3]),
+                  offset < maxSize
+            else { return false }
+        }
+        return true
     }
 
     func stats() -> (hits: Int, misses: Int) { (hits, misses) }
@@ -2124,6 +2241,41 @@ func hybridCacheBoundary(promptTokens: [Int], imStartId: Int?, cache: [KVCache])
           let boundary = promptTokens.lastIndex(of: imStartId), boundary > 0
     else { return nil }
     return boundary
+}
+
+/// Prompt positions at which a hybrid prefill from `start` to `boundary` should snapshot
+/// its recurrent state: turn starts, so a later prompt that edits history shares a prefix
+/// that ends on a turn boundary. A cold prefill (`start == 0`) first takes the turn after
+/// the system prompt (the anchor, which survives every later edit to the conversation);
+/// after that, a turn start only once `minGap` tokens have passed since the last snapshot
+/// (the resume point counts as one), which bounds how much an edit has to re-prefill.
+func hybridCheckpointPositions(
+    promptTokens: [Int], imStartId: Int?, start: Int, boundary: Int, minGap: Int = 2048
+) -> [Int] {
+    guard let imStartId else { return [] }
+    let turnStarts = promptTokens.indices.filter { promptTokens[$0] == imStartId }
+    var positions: [Int] = []
+    var last = start
+    if start == 0, turnStarts.count > 1, turnStarts[1] < boundary {
+        positions.append(turnStarts[1])
+        last = turnStarts[1]
+    }
+    for i in turnStarts where i > last && i < boundary && i - last >= minGap {
+        positions.append(i)
+        last = i
+    }
+    return positions
+}
+
+/// Detached, evaluated copy of every recurrent layer's state, keyed by layer index. The
+/// live arrays are overwritten by the next prefill segment, so they must not be shared.
+func recurrentSnapshot(_ cache: [KVCache]) -> [Int: [MLXArray]] {
+    var layers: [Int: [MLXArray]] = [:]
+    for (i, layer) in cache.enumerated() where layer is MambaCache {
+        layers[i] = layer.state.map(detachedArray)
+    }
+    eval(layers.values.flatMap { $0 })
+    return layers
 }
 
 /// Copy-on-write snapshot of a cache state array. RotatingKVCache (and the KVCacheSimple
@@ -2501,12 +2653,29 @@ func handleChatCompletion(
             if start < boundary {
                 // TokenIterator.init prefills its input into `cache` (same chunking and
                 // SSD-streaming error handling as a cold prefill), then samples one token
-                // without feeding it back, so the cache ends at exactly `boundary`.
-                _ = try TokenIterator(
-                    input: LMInput(text: sliceText(lmInput.text, from: start, to: boundary)),
-                    model: context.model, cache: cache, parameters: params)
+                // without feeding it back, so the cache ends at exactly its input's end.
+                // Prefill in segments, snapshotting the recurrent layers between them, so a
+                // later prompt that edits earlier history can resume from the last snapshot
+                // before the edit instead of from zero.
+                let cuts = hybridCheckpointPositions(
+                    promptTokens: promptTokens,
+                    imStartId: context.tokenizer.convertTokenToId("<|im_start|>"),
+                    start: start, boundary: boundary)
+                var checkpoints: [RecurrentCheckpoint] = []
+                var from = start
+                for stop in cuts + [boundary] {
+                    _ = try TokenIterator(
+                        input: LMInput(text: sliceText(lmInput.text, from: from, to: stop)),
+                        model: context.model, cache: cache, parameters: params)
+                    if stop < boundary {
+                        checkpoints.append(
+                            RecurrentCheckpoint(position: stop, layers: recurrentSnapshot(cache)))
+                    }
+                    from = stop
+                }
                 await promptCache.save(
-                    tokens: Array(promptTokens[..<boundary]), cache: cache, allowRecurrent: true)
+                    tokens: Array(promptTokens[..<boundary]), cache: cache, allowRecurrent: true,
+                    checkpoints: checkpoints, resumedFrom: start)
             }
             stream = try MLXLMCommon.generate(
                 input: LMInput(text: sliceText(lmInput.text, from: boundary)),

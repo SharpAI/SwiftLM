@@ -8,7 +8,14 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded runs on pull requests only. main is the release baseline and the
+  # trigger for the Release workflow, which fires on `workflow_run: completed` and refuses
+  # to publish unless CI concluded `success`. Rapid successive merges used to cancel the
+  # older main run mid-flight, which GitHub reports as `failure` with no test having
+  # failed, and made Release skip entirely. Letting each main commit finish is the point.
+  # (A bare `false` here would be a truthy string; the expression is what evaluates to a
+  # boolean.)
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build_and_unit_test:
@@ -120,6 +127,15 @@ jobs:
           # these assert server behaviour, not model quality (issue #128).
           - modality: contract
             models: mlx-community/Qwen2.5-0.5B-Instruct-4bit
+          # Hybrid (recurrent + attention) prompt cache. A prompt that diverges from a
+          # cached one resumes from a recurrent-state checkpoint instead of re-prefilling
+          # from zero; the unit suite only checks that bookkeeping against synthetic
+          # caches, so this job is what holds the end-to-end claim that a checkpoint
+          # resume computes the same thing as a full prefill. Qwen3.5 is the hybrid
+          # architecture under test, and the 0.8B build keeps the download small.
+          - modality: hybrid-cache
+            models: mlx-community/Qwen3.5-0.8B-MLX-4bit
+            test_model: mlx-community/Qwen3.5-0.8B-MLX-4bit
           - modality: omni
             models: mlx-community/gemma-4-e4b-it-4bit
           # No longer continue-on-error: Test 2 used to shell out to the opencode npm

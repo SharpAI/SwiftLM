@@ -564,6 +564,9 @@ struct MLXServer: AsyncParsableCommand {
     @Flag(name: .long, help: "Enable thinking/reasoning mode (Qwen3.5 etc). Default: disabled")
     var thinking: Bool = false
 
+    @Option(name: .long, help: "Hard cap on reasoning tokens per request (overridable per request with thinking_budget). After N thinking tokens the server closes the thinking block and the model answers. 0 closes it immediately. Needs thinking enabled and --max-tokens (or the request's max_tokens) large enough to hold the budget plus the answer. Default: no cap")
+    var thinkingBudget: Int?
+
     @Flag(name: .long, help: "Do not echo generated tokens to stdout as they stream. Request log lines are unaffected.")
     var noTokenEcho: Bool = false
 
@@ -628,6 +631,9 @@ struct MLXServer: AsyncParsableCommand {
     var mtpAssistantModel: String?
 
     func validate() throws {
+        if let thinkingBudget, thinkingBudget < 0 {
+            throw ValidationError("--thinking-budget must be 0 or more.")
+        }
         if vision && noVision {
             throw ValidationError("--vision and --no-vision are mutually exclusive.")
         }
@@ -1382,6 +1388,7 @@ struct MLXServer: AsyncParsableCommand {
             minP: self.minP,
             repeatPenalty: self.repeatPenalty,
             thinking: self.thinking,
+            thinkingBudget: self.thinkingBudget,
             maxPromptTokens: self.maxPromptTokens,
             promptCacheEntries: self.promptCacheEntries,
             tokenEcho: !self.noTokenEcho,
@@ -1699,6 +1706,8 @@ struct ServerConfig: Sendable {
     let minP: Float?
     let repeatPenalty: Float?
     let thinking: Bool
+    /// `--thinking-budget`: default cap on reasoning tokens. nil = no cap.
+    let thinkingBudget: Int?
     /// `--max-prompt-tokens`: longer prompts are rejected before prefill. nil = no limit.
     let maxPromptTokens: Int?
     /// `--prompt-cache-entries`: LRU capacity of the prompt cache.
@@ -2555,6 +2564,26 @@ func handleChatCompletion(
     }
     let promptTokens = lmInput.text.tokens.asArray(Int.self)
 
+    // ── Reasoning budget: per-request `thinking_budget` wins over `--thinking-budget` ──
+    let budgetComponents: GenerationComponents?
+    do {
+        budgetComponents = try thinkingBudgetComponents(
+            budget: chatReq.thinkingBudget ?? config.thinkingBudget, enableThinking: enableThinking,
+            reasoning: await container.configuration.reasoningConfig,
+            tokenizer: await container.tokenizer, parameters: params)
+    } catch let error as ThinkingBudgetError {
+        print("srv  slot_reject: id 0 | thinking budget: \(error.errorDescription ?? "invalid")")
+        slot.release()
+        await stats.requestFinished(tokens: 0, duration: 0)
+        return Response(
+            status: .badRequest, headers: jsonHeaders(),
+            body: .init(byteBuffer: ByteBuffer(string: thinkingBudgetErrorBody(error))))
+    }
+    let genComponents = budgetComponents ?? GenerationComponents()
+    if budgetComponents != nil, draftModelRef != nil || config.mtp || dflashModel != nil {
+        print("[SwiftLM] Warning: the thinking budget is not applied with speculative, MTP or DFlash decoding.")
+    }
+
     // ── Issue #108: does the template leave the thinking block open? ──
     // Qwen3/3.5/3.6 templates append `<think>\n` to the generation prompt when
     // enable_thinking is true, so the model emits reasoning with no opening tag of
@@ -2729,7 +2758,7 @@ func handleChatCompletion(
             }
             stream = try MLXLMCommon.generate(
                 input: LMInput(text: sliceText(lmInput.text, from: boundary)),
-                cache: cache, parameters: params, context: context)
+                cache: cache, parameters: params, context: context, components: genComponents)
         } else if let boundary = rotatingBoundary {
             var start = await promptCache.restore(newTokens: promptTokens, into: cache) ?? 0
             if start >= promptLength {
@@ -2753,7 +2782,7 @@ func handleChatCompletion(
             }
             stream = try MLXLMCommon.generate(
                 input: LMInput(text: sliceText(lmInput.text, from: start)),
-                cache: cache, parameters: params, context: context)
+                cache: cache, parameters: params, context: context, components: genComponents)
         } else if let draftRef = draftModelRef {
             // Speculative decoding path: draft model generates candidates, main model verifies.
             // Bypass prompt cache to avoid draft/main KV drift on partial-match restores.
@@ -2781,7 +2810,8 @@ func handleChatCompletion(
                 )
             } else {
                 stream = try MLXLMCommon.generate(
-                    input: trimmedInput, cache: cache, parameters: params, context: context
+                    input: trimmedInput, cache: cache, parameters: params, context: context,
+                    components: genComponents
                 )
             }
         } else {
@@ -2792,7 +2822,8 @@ func handleChatCompletion(
                 )
             } else {
                 stream = try MLXLMCommon.generate(
-                    input: lmInput, cache: cache, parameters: params, context: context
+                    input: lmInput, cache: cache, parameters: params, context: context,
+                    components: genComponents
                 )
             }
         }
@@ -3479,10 +3510,10 @@ func handleChatNonStreaming(
         print("srv debug: pre-extract fullText=\(fullText.prefix(40).debugDescription)")
         let (extracted, remaining) = extractThinkingBlock(from: fullText, alreadyOpen: thinkingPreOpened)
         print("srv debug: extracted=\(extracted != nil ? "true" : "false"), remaining_len=\(remaining.count)")
-        if let extracted {
-            reasoningContent = extracted
-            responseContent = remaining
-        }
+        // `remaining` is already `fullText` when no tag was found, and it drops the closing
+        // tag when the reasoning was empty (`</think>` first, e.g. a zero thinking budget).
+        reasoningContent = extracted
+        responseContent = remaining
     }
 
     // ── JSON mode validation ──
@@ -4142,6 +4173,41 @@ func promptTooLongBody(promptTokens: Int, limit: Int?) -> String? {
     return "{\"error\":{\"message\":\"This model's maximum context length is \(limit) tokens. However, your messages resulted in \(promptTokens) tokens.\",\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\"}}"
 }
 
+/// Components that cap reasoning at `budget` tokens, or nil when no cap applies (no budget,
+/// thinking off, or a model that declares no reasoning protocol). Throws `ThinkingBudgetError`
+/// for a budget the request cannot honour, e.g. a `max_tokens` too small for the budget plus
+/// the answer.
+///
+/// The transition is `.immediate`: the model's own `</think>` closes the span with no extra
+/// text. Qwen3.5 declares no validated hard-budget transition, so this is an opt-in.
+func thinkingBudgetComponents(
+    budget: Int?, enableThinking: Bool, reasoning: ReasoningConfig?,
+    tokenizer: any MLXLMCommon.Tokenizer, parameters: GenerateParameters
+) throws -> GenerationComponents? {
+    guard let budget, enableThinking, let reasoning else { return nil }
+    let configuration = try ThinkingBudgetConfiguration(
+        maximumTokenCount: budget, transitionOverride: .immediate)
+    let components = try GenerationComponents().applyingThinkingBudget(
+        configuration, reasoning: reasoning, tokenizer: tokenizer)
+    try components.validate(parameters: parameters)
+    return components
+}
+
+/// OpenAI-shaped 400 body for a reasoning budget the request cannot honour.
+func thinkingBudgetErrorBody(_ error: ThinkingBudgetError) -> String {
+    let payload: [String: Any] = ["error": [
+        "message": error.errorDescription ?? "Invalid thinking budget.",
+        "type": "invalid_request_error",
+        "code": "invalid_thinking_budget",
+    ]]
+    guard let data = try? JSONSerialization.data(withJSONObject: payload),
+          let json = String(data: data, encoding: .utf8)
+    else {
+        return "{\"error\":{\"message\":\"Invalid thinking budget.\",\"type\":\"invalid_request_error\",\"code\":\"invalid_thinking_budget\"}}"
+    }
+    return json
+}
+
 /// Releases the slot and returns a 400 when the prompt is over `--max-prompt-tokens`,
 /// else nil. Runs before prefill, so a rejected prompt costs no GPU work.
 func rejectLongPrompt(promptTokens: Int, limit: Int?, slot: GenerationSlot, stats: ServerStats) async -> Response? {
@@ -4556,6 +4622,8 @@ struct ChatCompletionRequest: Decodable {
     let responseFormat: ResponseFormat?
     /// Per-request Jinja template kwargs (e.g. {"enable_thinking": false} for Qwen3/Qwen3.5)
     let chatTemplateKwargs: [String: Bool]?
+    /// Per-request reasoning-token cap; overrides `--thinking-budget`.
+    let thinkingBudget: Int?
     /// Top-level thinking override emitted by Aegis-AI gateway
     let enableThinking: Bool?
     /// Number of bits for native MLX quantized KV cache (nil = no quantization).
@@ -4577,6 +4645,7 @@ struct ChatCompletionRequest: Decodable {
         case responseFormat = "response_format"
         case chatTemplateKwargs = "chat_template_kwargs"
         case enableThinking = "enable_thinking"
+        case thinkingBudget = "thinking_budget"
         case kvBits = "kv_bits"
     }
 }

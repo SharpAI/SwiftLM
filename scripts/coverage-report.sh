@@ -106,8 +106,10 @@ run_suite() {
     )
 }
 
-# SwiftPM embeds the metallib in each test bundle; only the Metal compiler is needed (#128 Tier 3).
-bash "$REPO_ROOT/scripts/check-metal-toolchain.sh"
+# The package suite aborts on its second test without this; see #128 Tier 3.
+if [ -x "$REPO_ROOT/scripts/install-test-metallib.sh" ]; then
+    bash "$REPO_ROOT/scripts/install-test-metallib.sh" >/dev/null 2>&1
+fi
 
 case "$WHICH" in
     package)   run_suite "$REPO_ROOT" "SwiftLM package" ;;

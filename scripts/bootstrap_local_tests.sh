@@ -1,33 +1,26 @@
 #!/bin/bash
 # Makes `swift test` runnable locally without CI's help.
 #
-# A bare `swift test` aborts with "Failed to load the default metallib"
-# because Package.swift links MLX but nothing on a local machine ever builds
-# or installs mlx.metallib. CI works around this in .github/workflows/ci.yml
-# ("Install MLX Metal library" step) by pip-installing the `mlx` wheel and
-# copying its bundled metallib into every built .xctest bundle. This script
-# does the same thing locally.
+# SwiftPM compiles the MLX kernels itself and embeds the metallib in each test bundle, so
+# nothing needs to be copied around; the only prerequisite is the Metal Toolchain (Xcode 26+
+# ships it as a separate download). Do NOT copy a metallib into <bundle>.xctest/Contents/MacOS:
+# it invalidates the bundle signature and the next incremental build fails at CodeSign.
+#
+# Usage: scripts/bootstrap_local_tests.sh [--with-server]
+#   --with-server  also build the release SwiftLM binary. A few SwiftBuddyTests (VLM, audio)
+#                  launch it from .build/release/SwiftLM and fail with "Could not find
+#                  SwiftLM executable" without it.
 set -eo pipefail
+cd "$(dirname "$0")/.."
 
-VENV_DIR="${MLX_METALLIB_VENV:-/tmp/swiftlm_mlx_venv}"
+bash scripts/check-metal-toolchain.sh
 
 echo "=> Building test harness (swift build --build-tests)..."
 swift build --build-tests
 
-echo "=> Installing MLX Metal library..."
-if [ ! -d "$VENV_DIR" ]; then
-    python3 -m venv "$VENV_DIR"
-fi
-"$VENV_DIR/bin/pip" install --quiet --upgrade mlx
-
-METALLIB=$(find "$VENV_DIR" -name "mlx.metallib" | head -1)
-if [ -z "$METALLIB" ]; then
-    echo "error: mlx.metallib not found after pip install mlx" >&2
-    exit 1
+if [ "${1:-}" = "--with-server" ]; then
+    echo "=> Building the SwiftLM server binary (swift build -c release)..."
+    swift build -c release
 fi
 
-cp "$METALLIB" .build/debug/ 2>/dev/null || true
-cp "$METALLIB" .build/release/ 2>/dev/null || true
-find .build -type d -name "MacOS" -exec cp "$METALLIB" {}/ \;
-
-echo "=> Done. Run tests with: swift test --skip-build"
+echo "=> Done. Run tests with: swift test --skip-build --filter SwiftLMTests --disable-swift-testing"

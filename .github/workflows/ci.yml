@@ -67,7 +67,6 @@ jobs:
           python3 -m venv /tmp/mlx_venv
           /tmp/mlx_venv/bin/pip install --quiet mlx
           cp /tmp/mlx_venv/lib/python*/site-packages/mlx/lib/mlx.metallib .build/release/
-          find .build -type d -name "MacOS" -exec cp /tmp/mlx_venv/lib/python*/site-packages/mlx/lib/mlx.metallib {}/ \;
 
       - name: SwiftBuddy Tests (MemPalace & Lifecycle)
         run: swift test --skip-build --filter SwiftBuddyTests --disable-swift-testing

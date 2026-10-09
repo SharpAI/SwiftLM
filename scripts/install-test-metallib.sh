@@ -11,11 +11,22 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Swift 6.4+ (Xcode 27) builds into .build/out/ and embeds default.metallib in
+# mlx-swift_Cmlx.bundle inside every .xctest, so there is nothing to install. Copying a
+# metallib into <bundle>.xctest/Contents/MacOS there invalidates the bundle signature and
+# the next incremental build fails at CodeSign. Older toolchains (Swift 6.2 / Xcode 26, the
+# layout CI uses: .build/arm64-apple-macosx/) do not embed one and still need the copy below.
+if [ -d .build/out ]; then
+    bash scripts/check-metal-toolchain.sh
+    echo "Swift 6.4+ build layout: metallib is embedded in the test bundles, nothing to install."
+    exit 0
+fi
+
 CONFIGS=("${1:-debug release}")
 
 find_metallib() {
     # 1. Already built by build.sh
-    for candidate in .build/*/release/mlx.metallib .build/*/release/default.metallib default.metallib; do
+    for candidate in .build/release/mlx.metallib .build/*/release/mlx.metallib .build/*/release/default.metallib default.metallib; do
         [ -f "$candidate" ] && { echo "$candidate"; return 0; }
     done
     # 2. From the mlx Python wheel, as CI does

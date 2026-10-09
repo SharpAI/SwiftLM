@@ -241,6 +241,30 @@ else
     fail "chunk-prefilled prompt returned no content: $(echo "$LONG_RESP" | head -c 120)"
 fi
 
+# ── 9. Request shapes the OpenAI API allows ──────────────────────────────────
+# `stop` may be a bare string; both request types decoded only the array form, and the
+# decode failure surfaced as a 500 `server_error`, which the OpenAI SDKs retry.
+log "Test 9: stop as a plain string"
+BODY=$(chat '{"model":"x","messages":[{"role":"user","content":"Count: one two three four five"}],"max_tokens":80,"temperature":0,"stop":"three"}' || true)
+CONTENT=$(echo "$BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"].get("content") or "")' 2>/dev/null || echo "__no_body__")
+if [ "$CONTENT" = "__no_body__" ]; then
+    fail "stop as a string was rejected: $(echo "$BODY" | head -c 120)"
+elif echo "$CONTENT" | grep -q "three"; then
+    fail "stop string 'three' leaked into content: $(echo "$CONTENT" | head -c 80)"
+else
+    pass "a bare stop string is accepted and honoured"
+fi
+
+log "Test 9b: a request that does not decode is a 400 invalid_request_error"
+CODE=$(curl -s -o /tmp/SwiftLM-contract-400.json -w '%{http_code}' "$URL/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d '{"model":"x","messages":[{"role":"user","content":"hi"}],"stop":42}')
+ERR_TYPE=$(python3 -c 'import json; e=json.load(open("/tmp/SwiftLM-contract-400.json"))["error"]; print(e.get("type"), e.get("param"))' 2>/dev/null || echo "unparseable")
+if [ "$CODE" = "400" ] && [ "$ERR_TYPE" = "invalid_request_error stop" ]; then
+    pass "400 invalid_request_error naming param 'stop'"
+else
+    fail "got HTTP $CODE with error '$ERR_TYPE' (expected 400 invalid_request_error stop)"
+fi
+
 log "═══════════════════════════════════════"
 log "Results: $PASS passed, $FAIL failed, $SKIP skipped, $TOTAL total"
 log "═══════════════════════════════════════"

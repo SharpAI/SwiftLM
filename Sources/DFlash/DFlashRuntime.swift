@@ -465,6 +465,10 @@ public enum DFlashRuntime {
         var prefetchedBlockLen: Int?
 
         while generatedTokenIDs.count < maxNewTokens {
+            // The consumer may be gone (stop sequence hit, client disconnected): the
+            // wrapper task is cancelled, and this loop must stop computing, not just
+            // stop yielding (#224).
+            if Task.isCancelled { break }
             let remaining = maxNewTokens - generatedTokenIDs.count
             let blockLen = max(1, min(effectiveBlockTokens, remaining))
 

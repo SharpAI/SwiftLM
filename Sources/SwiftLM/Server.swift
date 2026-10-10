@@ -2385,12 +2385,15 @@ func handleChatCompletion(
         prefillStepSize: config.prefillSize
     )
     generateParams.prefill.progress = forwardPrefillProgress
+    // ── Seed ──
+    // The samplers draw from their own RandomState, which only `GenerateParameters.seed`
+    // seeds; seeding the global generator alone left the request's `seed` without any
+    // effect (#219). The global generator is still seeded for the paths that call
+    // MLXRandom directly.
+    let seed = samplingSeed(chatReq.seed)
+    generateParams.seed = seed
+    if let seed { MLXRandom.seed(seed) }
     let params = generateParams
-
-    // ── Seed for deterministic generation ──
-    if let seed = chatReq.seed {
-        MLXRandom.seed(UInt64(seed))
-    }
 
     // ── Parse messages with multipart content support (for VLM images) ──
     var chatMessages: [Chat.Message] = []
@@ -3565,11 +3568,11 @@ func handleTextCompletion(
         prefillStepSize: config.prefillSize
     )
     generateParams.prefill.progress = forwardPrefillProgress
+    // Same seeding as the chat path; see the comment there (#219).
+    let seed = samplingSeed(compReq.seed)
+    generateParams.seed = seed
+    if let seed { MLXRandom.seed(seed) }
     let params = generateParams
-
-    if let seed = compReq.seed {
-        MLXRandom.seed(UInt64(seed))
-    }
 
     await semaphore.wait()
     let slot = GenerationSlot(semaphore: semaphore)
@@ -4041,6 +4044,13 @@ func checkStopSequences(_ text: String, stopSequences: [String], lookback: Int? 
     }
     guard let earliest else { return nil }
     return (String(text[text.startIndex..<earliest.index]), earliest.stop)
+}
+
+/// The sampler seed for a request `seed`. OpenAI's `seed` is a plain integer, so negative
+/// values do arrive, and `UInt64(seed)` trapped on them — one such request took the whole
+/// server down (#219). Taking the bit pattern keeps every distinct Int a distinct seed.
+func samplingSeed(_ requested: Int?) -> UInt64? {
+    requested.map { UInt64(bitPattern: Int64($0)) }
 }
 
 /// Characters of already-checked text a streaming stop scan must look back over: the

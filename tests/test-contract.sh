@@ -241,6 +241,32 @@ else
     fail "chunk-prefilled prompt returned no content: $(echo "$LONG_RESP" | head -c 120)"
 fi
 
+# ── 9. `seed` makes sampling reproducible, and a negative one is harmless ────
+# Issue #219: the request seed only reached MLX's global generator, which the samplers
+# don't draw from, so the same seed sampled differently every time; and UInt64(seed)
+# trapped on a negative value, taking the whole server down with one request.
+log "Test 9: the same seed samples the same answer"
+SEEDED='{"model":"x","messages":[{"role":"user","content":"Pick a random animal and say only its name."}],"max_tokens":12,"temperature":1.0,"seed":4242}'
+# The first call also fills the prompt cache; comparing two cache-hit calls keeps the
+# assertion about the sampler rather than about prefill numerics.
+chat "$SEEDED" >/dev/null
+seeded_message() { chat "$SEEDED" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["choices"][0]["message"], sort_keys=True))'; }
+S1=$(seeded_message); S2=$(seeded_message)
+if [ -n "$S1" ] && [ "$S1" = "$S2" ]; then
+    pass "seeded sampling is reproducible ($(echo "$S1" | head -c 60))"
+else
+    fail "same seed gave different output: $(echo "$S1" | head -c 60) vs $(echo "$S2" | head -c 60)"
+fi
+
+log "Test 9b: a negative seed is accepted and the server survives it"
+NEG_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$URL/v1/chat/completions" -H 'Content-Type: application/json' \
+    -d '{"model":"x","messages":[{"role":"user","content":"hi"}],"max_tokens":3,"seed":-1}')
+if [ "$NEG_CODE" = "200" ] && curl -sf "$URL/health" >/dev/null 2>&1; then
+    pass "negative seed answered 200 and /health still responds"
+else
+    fail "negative seed: HTTP $NEG_CODE (000 = connection dropped), server alive: $(curl -sf "$URL/health" >/dev/null 2>&1 && echo yes || echo no)"
+fi
+
 log "═══════════════════════════════════════"
 log "Results: $PASS passed, $FAIL failed, $SKIP skipped, $TOTAL total"
 log "═══════════════════════════════════════"

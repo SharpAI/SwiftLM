@@ -2405,7 +2405,12 @@ func handleChatCompletion(
     dflashTargetModel: (any DFlashTargetModel)? = nil,
     mtpAssistant: (any DualModelMTP)? = nil
 ) async throws -> Response {
-    let chatReq = try JSONDecoder().decode(ChatCompletionRequest.self, from: bodyData)
+    let chatReq: ChatCompletionRequest
+    do {
+        chatReq = try JSONDecoder().decode(ChatCompletionRequest.self, from: bodyData)
+    } catch let error as DecodingError {
+        return invalidRequestResponse(error)
+    }
     let isStream = chatReq.stream ?? false
     let jsonMode = chatReq.responseFormat?.type == "json_object"
     let emitPrefillProgress = prefillProgressEnabled(in: request)
@@ -2417,7 +2422,7 @@ func handleChatCompletion(
     let topK = chatReq.topK ?? config.topK ?? 50
     let minP = chatReq.minP.map(Float.init) ?? config.minP ?? 0.0
     let repeatPenalty = chatReq.repetitionPenalty.map(Float.init) ?? config.repeatPenalty
-    let stopSequences = (chatReq.stop ?? []) + ["<end_of_turn>", "<|im_end|>", "<|eot_id|>", "<turn|>", "<|tool_response|>"]
+    let stopSequences = (chatReq.stop?.values ?? []) + ["<end_of_turn>", "<|im_end|>", "<|eot_id|>", "<turn|>", "<|tool_response|>"]
     let includeUsage = chatReq.streamOptions?.includeUsage ?? false
 
     // Log extra sampling params if provided (accepted for API compat, not all are used)
@@ -3577,7 +3582,12 @@ func handleTextCompletion(
     semaphore: AsyncSemaphore,
     stats: ServerStats
 ) async throws -> Response {
-    let compReq = try JSONDecoder().decode(TextCompletionRequest.self, from: bodyData)
+    let compReq: TextCompletionRequest
+    do {
+        compReq = try JSONDecoder().decode(TextCompletionRequest.self, from: bodyData)
+    } catch let error as DecodingError {
+        return invalidRequestResponse(error)
+    }
     let isStream = compReq.stream ?? false
     let emitPrefillProgress = prefillProgressEnabled(in: request)
 
@@ -3587,7 +3597,7 @@ func handleTextCompletion(
     let topK = compReq.topK ?? config.topK ?? 50
     let minP = compReq.minP.map(Float.init) ?? config.minP ?? 0.0
     let repeatPenalty = compReq.repetitionPenalty.map(Float.init) ?? config.repeatPenalty
-    let stopSequences = compReq.stop ?? []
+    let stopSequences = compReq.stop?.values ?? []
 
     var generateParams = GenerateParameters(
         maxTokens: tokenLimit,
@@ -4142,6 +4152,51 @@ func rejectLongPrompt(promptTokens: Int, limit: Int?, slot: GenerationSlot, stat
     return Response(status: .badRequest, headers: jsonHeaders(), body: .init(byteBuffer: ByteBuffer(string: body)))
 }
 
+/// The 400 for a request body that does not decode. OpenAI answers these with
+/// `invalid_request_error` and names the offending `param`; the OpenAI SDKs treat a 400
+/// as final but retry a 5xx, so answering a decode failure with 500 `server_error` cost
+/// every malformed request three attempts and told the client the server was at fault.
+func invalidRequestResponse(_ error: DecodingError) -> Response {
+    Response(
+        status: .badRequest,
+        headers: jsonHeaders(),
+        body: .init(byteBuffer: ByteBuffer(string: invalidRequestJSON(error)))
+    )
+}
+
+func invalidRequestJSON(_ error: DecodingError) -> String {
+    func dotted(_ path: [CodingKey]) -> String {
+        path.map { $0.intValue.map(String.init) ?? $0.stringValue }.joined(separator: ".")
+    }
+    let message: String
+    let path: [CodingKey]
+    switch error {
+    case .keyNotFound(let key, let context):
+        path = context.codingPath + [key]
+        message = "Missing required parameter: '\(dotted(path))'."
+    case .typeMismatch(_, let context):
+        path = context.codingPath
+        message = "Invalid type for '\(dotted(path))': \(context.debugDescription)"
+    case .valueNotFound(_, let context):
+        path = context.codingPath
+        message = "Missing value for '\(dotted(path))'."
+    case .dataCorrupted(let context):
+        path = context.codingPath
+        message = context.debugDescription
+    @unknown default:
+        path = []
+        message = String(describing: error)
+    }
+    var payload: [String: Any] = ["message": message, "type": "invalid_request_error"]
+    if !path.isEmpty { payload["param"] = dotted(path) }
+    guard let data = try? JSONSerialization.data(withJSONObject: ["error": payload]),
+          let json = String(data: data, encoding: .utf8)
+    else {
+        return "{\"error\":{\"message\":\"invalid request\",\"type\":\"invalid_request_error\"}}"
+    }
+    return json
+}
+
 /// Build an OpenAI-style `{"error":{...}}` body for a server error. The message
 /// is JSON-encoded, so quotes, backslashes and newlines in it stay valid JSON.
 func errorJSON(_ error: Error) -> String {
@@ -4495,7 +4550,7 @@ struct ChatCompletionRequest: Decodable {
     let frequencyPenalty: Double?
     let presencePenalty: Double?
     let tools: [ToolDef]?
-    let stop: [String]?
+    let stop: StopSequences?
     let seed: Int?
     let streamOptions: StreamOptions?
     let responseFormat: ResponseFormat?
@@ -4526,6 +4581,21 @@ struct ChatCompletionRequest: Decodable {
     }
 }
 
+/// OpenAI's `stop` is "string / array / null": a single sequence may be sent bare, and
+/// several clients do. Decoding only the array form answered those requests with a 500.
+struct StopSequences: Decodable {
+    let values: [String]
+
+    init(from decoder: Swift.Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let single = try? container.decode(String.self) {
+            values = [single]
+        } else {
+            values = try container.decode([String].self)
+        }
+    }
+}
+
 struct TextCompletionRequest: Decodable {
     let model: String?
     let prompt: String
@@ -4536,7 +4606,7 @@ struct TextCompletionRequest: Decodable {
     let topK: Int?
     let minP: Double?
     let repetitionPenalty: Double?
-    let stop: [String]?
+    let stop: StopSequences?
     let seed: Int?
 
     enum CodingKeys: String, CodingKey {

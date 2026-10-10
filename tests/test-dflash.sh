@@ -189,6 +189,26 @@ else
     fail "Speculative decoding path not activated (missing log line)"
 fi
 
+# ── Test 4: A stream that ends early must not leave a generation running ──
+# Issue #224: the text-level stop ended the SSE stream and released the slot, but the
+# DFlash loop ran on to max_tokens; the next request then overlapped it and MLX aborted.
+# A one-word answer against a large budget leaves plenty of orphaned work for the next
+# request to collide with.
+log "Test 4: early-ended stream does not leave a generation running"
+EARLY=$(curl -sf -N --max-time 120 -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MAIN_MODEL\",\"stream\":true,\"max_tokens\":200,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: ok\"}]}" \
+    2>/dev/null || true)
+AFTER=$(curl -sf --max-time 120 -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MAIN_MODEL\",\"max_tokens\":10,\"messages\":[{\"role\":\"user\",\"content\":\"Say the word: done\"}]}" 2>/dev/null || echo "")
+AFTER_CONTENT=$(echo "$AFTER" | jq -r '.choices[0].message.content // empty' 2>/dev/null || echo "")
+if echo "$EARLY" | grep -q "data: \[DONE\]" && [ -n "$AFTER_CONTENT" ] && curl -sf "$URL/health" >/dev/null 2>&1; then
+    pass "request after an early-ended stream completed and the server is still up"
+else
+    fail "request after an early-ended stream failed (server alive: $(curl -sf "$URL/health" >/dev/null 2>&1 && echo yes || echo no))"
+fi
+
 # ── Test 5: Multiple sequential requests (stability) ────────────────
 log "Test 5: Sequential request stability (3 requests)"
 

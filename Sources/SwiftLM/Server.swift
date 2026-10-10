@@ -2321,6 +2321,73 @@ func collectBody(_ request: Request) async throws -> Data {
     return Data(bodyBytes)
 }
 
+/// The end-of-sequence set the standard path stops on (`buildStopTokenIds` in
+/// mlx-swift-lm): the configuration's ids, the tokenizer's EOS and the extra EOS tokens
+/// resolved through the tokenizer. DFlash takes it as a list.
+func stopTokenIDs(
+    eosTokenIDs: Set<Int>, tokenizerEOS: Int?, extraEOSTokens: Set<String>,
+    tokenID: (String) -> Int?
+) -> [Int] {
+    var ids = eosTokenIDs
+    if let tokenizerEOS { ids.insert(tokenizerEOS) }
+    for token in extraEOSTokens {
+        if let id = tokenID(token) { ids.insert(id) }
+    }
+    return ids.sorted()
+}
+
+/// Mutable detokenizer shared with the bridge task in `dflashGenerationStream`.
+private final class DetokenizerBox: @unchecked Sendable {
+    var detokenizer: NaiveStreamingDetokenizer
+    init(_ d: NaiveStreamingDetokenizer) { self.detokenizer = d }
+}
+
+/// Bridges a DFlash event stream to the `Generation` stream the handlers consume.
+///
+/// When the consumer stops early — a text-level stop sequence, a client disconnect — the
+/// returned stream is torn down, which cancels the bridge task; that ends the DFlash
+/// stream and, through its own `onTermination`, the DFlash generation task. Before this
+/// the bridge was a bare `Task` nobody cancelled, so the DFlash loop ran on to
+/// `max_tokens` after the response had ended and the next request's generation
+/// overlapped it (#224).
+func dflashGenerationStream(
+    _ events: AsyncStream<DFlashEvent>,
+    tokenLimit: Int,
+    nextText: @escaping @Sendable (Int) -> String?
+) -> AsyncStream<Generation> {
+    AsyncStream<Generation> { continuation in
+        let bridge = Task {
+            for await event in events {
+                if Task.isCancelled { break }
+                switch event {
+                case .token(let tokenID, _, _, _):
+                    if let chunk = nextText(tokenID) {
+                        continuation.yield(.chunk(chunk, tokenId: tokenID))
+                    }
+                case .prefill, .prefillProgress:
+                    break
+                case .summary(let summary):
+                    print("[SwiftLM] DFlash summary: \(summary.generationTokens) tokens, \(String(format: "%.1f", summary.tokensPerSecond)) tok/s, acceptance=\(String(format: "%.1f%%", summary.acceptanceRatio * 100)), \(summary.cyclesCompleted) cycles")
+                    // The SSE/non-streaming handlers emit finish_reason, usage and
+                    // `[DONE]` from `.info`. Without it, a DFlash run that ends on EOS
+                    // or max_tokens (rather than a textual stop sequence) closes the
+                    // stream with no `[DONE]` sentinel.
+                    let prefillSec = summary.phaseTimingsUs.prefill / 1_000_000.0
+                    continuation.yield(.info(GenerateCompletionInfo(
+                        promptTokenCount: summary.promptTokenCount,
+                        generationTokenCount: summary.generationTokens,
+                        promptTime: prefillSec,
+                        generationTime: summary.elapsedUs / 1_000_000.0 - prefillSec,
+                        stopReason: summary.generationTokens >= tokenLimit ? .length : .stop
+                    )))
+                }
+            }
+            continuation.finish()
+        }
+        continuation.onTermination = { _ in bridge.cancel() }
+    }
+}
+
 // ── Chat Completions Handler ─────────────────────────────────────────────────
 
 func handleChatCompletion(
@@ -2527,50 +2594,25 @@ func handleChatCompletion(
         fflush(stdout)
         // Convert DFlashEvent stream to Generation stream with proper streaming detokenizer
         let dflashTokenizer = await container.tokenizer
+        let dflashConfiguration = await container.configuration
         let dflashStream = DFlashRuntime.generate(
             targetModel: targetModel,
             draftModel: dflashDraft,
             promptTokens: promptTokens,
             maxNewTokens: tokenLimit,
-            blockTokens: dflashBlockSize
+            blockTokens: dflashBlockSize,
+            // The end-of-sequence set the standard path stops on. Without it DFlash ran
+            // to max_tokens past `<|im_end|>` (#224).
+            stopTokenIDs: stopTokenIDs(
+                eosTokenIDs: dflashConfiguration.eosTokenIds,
+                tokenizerEOS: dflashTokenizer.eosTokenId,
+                extraEOSTokens: dflashConfiguration.extraEOSTokens,
+                tokenID: dflashTokenizer.convertTokenToId)
         )
-
-        // Use a class wrapper so the detokenizer can be mutated inside the closure
-        final class DetokenizerBox: @unchecked Sendable {
-            var detokenizer: NaiveStreamingDetokenizer
-            init(_ d: NaiveStreamingDetokenizer) { self.detokenizer = d }
-        }
         let box = DetokenizerBox(NaiveStreamingDetokenizer(tokenizer: dflashTokenizer))
-
-        let genStream = AsyncStream<Generation> { continuation in
-            Task {
-                for await event in dflashStream {
-                    switch event {
-                    case .token(let tokenID, _, _, _):
-                        box.detokenizer.append(token: tokenID)
-                        if let chunk = box.detokenizer.next() {
-                            continuation.yield(.chunk(chunk, tokenId: tokenID))
-                        }
-                    case .prefill, .prefillProgress:
-                        break
-                    case .summary(let summary):
-                        print("[SwiftLM] DFlash summary: \(summary.generationTokens) tokens, \(String(format: "%.1f", summary.tokensPerSecond)) tok/s, acceptance=\(String(format: "%.1f%%", summary.acceptanceRatio * 100)), \(summary.cyclesCompleted) cycles")
-                        // The SSE/non-streaming handlers emit finish_reason, usage and
-                        // `[DONE]` from `.info`. Without it, a DFlash run that ends on EOS
-                        // or max_tokens (rather than a textual stop sequence) closes the
-                        // stream with no `[DONE]` sentinel.
-                        let prefillSec = summary.phaseTimingsUs.prefill / 1_000_000.0
-                        continuation.yield(.info(GenerateCompletionInfo(
-                            promptTokenCount: summary.promptTokenCount,
-                            generationTokenCount: summary.generationTokens,
-                            promptTime: prefillSec,
-                            generationTime: summary.elapsedUs / 1_000_000.0 - prefillSec,
-                            stopReason: summary.generationTokens >= tokenLimit ? .length : .stop
-                        )))
-                    }
-                }
-                continuation.finish()
-            }
+        let genStream = dflashGenerationStream(dflashStream, tokenLimit: tokenLimit) { tokenID in
+            box.detokenizer.append(token: tokenID)
+            return box.detokenizer.next()
         }
 
         return (genStream, nil)

@@ -190,11 +190,24 @@ jobs:
         env:
           HF_HUB_DOWNLOAD_TIMEOUT: "600"
           SWIFTLM_TEST_MODEL: ${{ matrix.test_model }}
+          # Diagnostic: print a Swift backtrace when the server dies with a signal.
+          SWIFT_BACKTRACE: "enable=yes,interactive=no"
         run: |
           chmod +x tests/test-${{ matrix.modality }}.sh
           for attempt in 1 2 3; do
             echo "Attempt $attempt of 3..."
+            # Diagnostic: collect the SwiftLM crash report from every attempt, not only when the
+            # job fails, because the job retries and a crash in attempt 1 is otherwise invisible.
+            touch "$RUNNER_TEMP/attempt-$attempt"
             if tests/test-${{ matrix.modality }}.sh .build/release/SwiftLM 15413; then exit 0; fi
+            # ReportCrash writes the report a moment after the server dies, so wait before looking.
+            sleep 10
+            reports=$(find "$HOME/Library/Logs/DiagnosticReports" -name '*SwiftLM*' -newer "$RUNNER_TEMP/attempt-$attempt" 2>/dev/null || true)
+            if [ -z "$reports" ]; then echo "no new SwiftLM crash report for attempt $attempt"; fi
+            for f in $reports; do
+              echo "===== crash report, attempt $attempt: $f"
+              head -c 60000 "$f"
+            done
             if [ "$attempt" -eq 3 ]; then echo "All attempts failed"; exit 1; fi
             sleep 10
           done

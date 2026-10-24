@@ -2765,8 +2765,8 @@ func handleChatCompletion(
         // layers (RotatingKVCache under --ctx-size; this path must run before the
         // sliding-window one, which misses on any MambaCache), and the generic path below
         // refuses them: recurrent state cannot be
-        // trimmed, and the onPrefillDone save runs after the first decode token has been
-        // fed. Without this, every agent turn re-prefills the whole conversation. Instead:
+        // trimmed, and the onPrefillDone save runs once the producer has emitted `.info`.
+        // Without this, every agent turn re-prefills the whole conversation. Instead:
         // resume from an exact cached prefix, prefill to the turn boundary, snapshot there
         // synchronously, then generate the few tokens after it.
         let hybridBoundary = (skipPromptCache || draftModelRef != nil || config.mtp || config.turboKV)
@@ -3302,7 +3302,6 @@ func handleChatStreaming(
                     let memSnap = MemoryUtils.snapshot()
                     print("srv  slot update: id 0 | prefill done | n_tokens=\(promptTokenCount), t=\(String(format: "%.2f", prefillDur))s, \(String(format: "%.1f", prefillTokPerSec))t/s | OS_RAM=\(String(format: "%.1f", memSnap.os))GB | MEM_DEMAND=\(String(format: "%.1f", memSnap.demand))GB | GPU_MEM=\(String(format: "%.1f", memSnap.gpu))GB")
                     print("srv  generate: id 0 | ", terminator: "")
-                    if let onPrefillDone { await onPrefillDone() }
                     firstToken = false
                 }
                 if tokenEcho {
@@ -3413,6 +3412,11 @@ func handleChatStreaming(
                 print("[SwiftLM] Rejected tool call: reason=\(rejection.reason) tool=\(rejection.toolName ?? "?") detail=\(rejection.detail ?? "n/a")")
 
             case .info(let info):
+                // `.info` is the producer's last yield, so the cache is no longer written once
+                // it arrives. The prompt is saved here, not on the first chunk: that raced the
+                // decode step the producer had already started on the same KVCacheSimple. An
+                // early exit (stop sequence, disconnect) never reaches `.info` and skips the save.
+                if !firstToken, let onPrefillDone { await onPrefillDone() }
                 // The chunk count undercounts: tokens the decoder buffers (tool-call
                 // bodies, partial text) emit no chunk. `info` carries the real count.
                 completionTokenCount = info.generationTokenCount
@@ -3568,7 +3572,6 @@ func handleChatNonStreaming(
                 let memSnap = MemoryUtils.snapshot()
                 print("srv  slot update: id 0 | prefill done | n_tokens=\(promptTokenCount), t=\(String(format: "%.2f", prefillDur))s, \(String(format: "%.1f", prefillTokPerSec))t/s | OS_RAM=\(String(format: "%.1f", memSnap.os))GB | MEM_DEMAND=\(String(format: "%.1f", memSnap.demand))GB | GPU_MEM=\(String(format: "%.1f", memSnap.gpu))GB")
                 print("srv  generate: id 0 | ", terminator: "")
-                if let onPrefillDone { await onPrefillDone() }
                 firstToken = false
             }
             if tokenEcho {
@@ -3587,6 +3590,9 @@ func handleChatNonStreaming(
             // See the matching comment in `handleChatStreaming`: log only, no wire shape.
             print("[SwiftLM] Rejected tool call: reason=\(rejection.reason) tool=\(rejection.toolName ?? "?") detail=\(rejection.detail ?? "n/a")")
         case .info(let info):
+            // The producer's last yield; see the matching comment in `handleChatStreaming`.
+            // The stop-sequence `break` above exits before `.info`, so it skips the save.
+            if !firstToken, let onPrefillDone { await onPrefillDone() }
             generationStopReason = info.stopReason
             completionTokenCount = info.generationTokenCount  // real count; see handleChatStreaming
         }

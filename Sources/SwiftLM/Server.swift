@@ -2716,6 +2716,13 @@ func handleChatCompletion(
 
     // ── Cache-aware generation (standard path) ──
     let (stream, onPrefillDone) = try await container.perform { context -> (AsyncStream<Generation>, (() async -> Void)?) in
+        // mlx-swift-lm can route a model's thinking into separate `.reasoning` events, with the
+        // delimiters removed. This server splits `<think>…</think>` out of `.chunk` text itself
+        // (`ThinkingStateTracker`) and maps it to `reasoning_content`, so the generation loop is
+        // given a context without a reasoning protocol and keeps emitting the text inline. The
+        // thinking budget above still reads the real config from the container.
+        var context = context
+        context.configuration.reasoningConfig = nil
         let cache = try context.model.newCache(parameters: params)
 
         // ── TurboQuant: enable 3-bit KV compression on every KVCacheSimple layer ──
@@ -3504,6 +3511,10 @@ func handleChatStreaming(
                         fflush(stdout)
                     }
                 }
+            default:
+                // Events this build does not model (mlx-swift-lm's `.reasoning`, from the 2026-10
+                // upstream sync) are ignored: SwiftLM still splits `<think>` out of `.chunk` text itself.
+                break
             }
         }
         // Safety net: the tail is normally released in `case .info`, but a stream that
@@ -3608,6 +3619,10 @@ func handleChatNonStreaming(
             if let onPrefillDone { await onPrefillDone() }
             generationStopReason = info.stopReason
             completionTokenCount = info.generationTokenCount  // real count; see handleChatStreaming
+        default:
+            // Events this build does not model (mlx-swift-lm's `.reasoning`, from the 2026-10
+            // upstream sync) are ignored: SwiftLM still splits `<think>` out of `.chunk` text itself.
+            break
         }
     }
     print("")  // end the real-time token stream line
@@ -3954,6 +3969,10 @@ func handleTextStreaming(
                     cont.yield("data: [DONE]\n\n")
                     cont.finish()
                 }
+            default:
+                // Events this build does not model (mlx-swift-lm's `.reasoning`, from the 2026-10
+                // upstream sync) are ignored: SwiftLM still splits `<think>` out of `.chunk` text itself.
+                break
             }
         }
         // The tail never became a stop sequence, so it is ordinary output. Normally
@@ -4008,6 +4027,10 @@ func handleTextNonStreaming(
             generationStopReason = info.stopReason
             completionTokenCount = info.generationTokenCount  // real count; see handleChatStreaming
         case .toolCall, .rejectedToolCall:
+            break
+        default:
+            // Events this build does not model (mlx-swift-lm's `.reasoning`, from the 2026-10
+            // upstream sync) are ignored: SwiftLM still splits `<think>` out of `.chunk` text itself.
             break
         }
     }

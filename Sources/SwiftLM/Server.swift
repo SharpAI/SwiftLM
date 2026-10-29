@@ -2799,6 +2799,26 @@ func handleChatCompletion(
                     context.tokenizer.convertTokenToId("<|turn>"),
                     context.tokenizer.convertTokenToId("<|im_start|>"),
                 ])
+        // ── Full-attention prompt cache ──
+        // Saving once the producer has emitted `.info` misses every request that ends early:
+        // a stop sequence or a client disconnect leaves the stream before `.info`, so the
+        // next turn re-prefills the whole history (#245). Snapshot at the turn boundary
+        // instead, as the paths above do: prefill the prompt but its last token
+        // synchronously, save, and let generation feed the last token. No decode step has
+        // started, so nothing is writing the cache while it is read. The saved prefix is one
+        // token short of the prompt; restore replays that token anyway.
+        let saveAtBoundary = !skipPromptCache && hybridBoundary == nil && rotatingBoundary == nil
+            && draftModelRef == nil && !config.mtp && !config.turboKV && !hasRotatingLayer
+            && promptLength > 1
+        func snapshotPrompt(from start: Int) async throws -> Int {
+            let boundary = promptLength - 1
+            guard saveAtBoundary, start < boundary else { return start }
+            _ = try TokenIterator(
+                input: LMInput(text: sliceText(lmInput.text, from: start, to: boundary)),
+                model: context.model, cache: cache, parameters: params)
+            await promptCache.save(tokens: Array(promptTokens[..<boundary]), cache: cache)
+            return boundary
+        }
         var stream: AsyncStream<Generation>
         if let boundary = hybridBoundary {
             let start = await promptCache.restoreExactPrefix(
@@ -2877,6 +2897,7 @@ func handleChatCompletion(
                 // Trim the KV cache back by 1 to avoid double-counting the replayed token.
                 for layer in cache { layer.trim(1) }
             }
+            startIndex = try await snapshotPrompt(from: startIndex)
             let trimmedInput = LMInput(text: sliceText(lmInput.text, from: startIndex))
             if config.mtp, let mtpCtx = mtpContext(main: context, assistant: mtpAssistant) {
                 stream = try MLXLMCommon.generateMTP(
@@ -2895,9 +2916,10 @@ func handleChatCompletion(
                     input: lmInput, cache: cache, parameters: params, context: mtpCtx, numMTPTokens: config.numMtpTokens
                 )
             } else {
+                let start = try await snapshotPrompt(from: 0)
                 stream = try MLXLMCommon.generate(
-                    input: lmInput, cache: cache, parameters: params, context: context,
-                    components: genComponents
+                    input: start == 0 ? lmInput : LMInput(text: sliceText(lmInput.text, from: start)),
+                    cache: cache, parameters: params, context: context, components: genComponents
                 )
             }
         }
@@ -2922,6 +2944,8 @@ func handleChatCompletion(
             // The hybrid path already saved at its boundary; a save here would capture
             // recurrent state one decode token too late.
             guard hybridBoundary == nil, rotatingBoundary == nil else { return }
+            // Saved at the boundary above, before generation started.
+            guard !saveAtBoundary else { return }
             // Nothing would ever restore it (see skipPromptCache above).
             guard !skipPromptCache else { return }
             // A ring buffer cannot be snapshotted after the first decode token (the MTP,
@@ -3433,7 +3457,9 @@ func handleChatStreaming(
                 // `.info` is the producer's last yield, so the cache is no longer written once
                 // it arrives. The prompt is saved here, not on the first chunk: that raced the
                 // decode step the producer had already started on the same KVCacheSimple. An
-                // early exit (stop sequence, disconnect) never reaches `.info` and skips the save.
+                // early exit (stop sequence, disconnect) never reaches `.info`, so the
+                // full-attention path saves at the prompt boundary before generating instead
+                // (`saveAtBoundary`); only the paths that still save here skip on early exit.
                 // The save does not wait for a chunk: a turn that is only a tool call never
                 // yields one, and its prompt is exactly what the next turn of the loop needs.
                 if let onPrefillDone { await onPrefillDone() }
@@ -3615,7 +3641,8 @@ func handleChatNonStreaming(
             print("[SwiftLM] Rejected tool call: reason=\(rejection.reason) tool=\(rejection.toolName ?? "?") detail=\(rejection.detail ?? "n/a")")
         case .info(let info):
             // The producer's last yield; see the matching comment in `handleChatStreaming`.
-            // The stop-sequence `break` above exits before `.info`, so it skips the save.
+            // The stop-sequence `break` above exits before `.info`; the paths that save at the
+            // prompt boundary are unaffected, the others skip the save.
             if let onPrefillDone { await onPrefillDone() }
             generationStopReason = info.stopReason
             completionTokenCount = info.generationTokenCount  // real count; see handleChatStreaming

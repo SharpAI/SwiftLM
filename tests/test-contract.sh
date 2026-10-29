@@ -407,6 +407,96 @@ else
     fail "json_object stream differs from non-streaming: '$(echo "$ST_JSON" | head -c 60)' vs '$(echo "$NS_JSON" | head -c 60)'"
 fi
 
+# ── 14. An abandoned non-streaming request stops generating ───────────────────
+# The SSE handlers cancel generation when the client goes away (their next write fails).
+# A non-streaming request writes nothing until the end, so the server never noticed the
+# client had left: the answer ran to max_tokens for nobody and held the slot, and with
+# the default --parallel 1 every later request queued behind it. Clients that time out
+# and retry (the OpenAI SDKs' default) stacked up several such generations.
+log "Test 14: a non-streaming request the client abandons stops generating"
+metric() { curl -sf "$URL/metrics" | awk -v m="$1" '$1 == m { print $2 }'; }
+TOKENS_BEFORE=$(metric swiftlm_tokens_generated_total)
+# curl closes the socket after half a second; left alone, the request would generate 1500 tokens.
+curl -s --max-time 0.5 "$URL/v1/chat/completions" -H 'Content-Type: application/json' \
+    -d "{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"$LONG_ASK\"}],\"max_tokens\":1500,\"temperature\":0.9}" >/dev/null 2>&1 || true
+# Once the server has noticed, the request is no longer active and its token count is the
+# few chunks it managed before the cancel, not a full answer.
+ACTIVE=1
+for _ in $(seq 1 20); do
+    ACTIVE=$(metric swiftlm_requests_active)
+    [ "$ACTIVE" = "0" ] && break
+    sleep 0.25
+done
+TOKENS_AFTER=$(metric swiftlm_tokens_generated_total)
+ABANDONED_TOKENS=$((TOKENS_AFTER - TOKENS_BEFORE))
+if [ "$ACTIVE" = "0" ] && [ "$ABANDONED_TOKENS" -lt 400 ]; then
+    pass "the abandoned request stopped after $ABANDONED_TOKENS tokens and released its slot"
+else
+    fail "the abandoned request generated $ABANDONED_TOKENS tokens; requests_active=$ACTIVE 5 s after the client left"
+fi
+
+# ── 15. A tool-call-only turn saves the prompt cache ─────────────────────────
+# #245: the save at `.info` waited for a text chunk, and a turn the model answers with
+# nothing but a tool call never produces one. The next turn of an agent loop (tool
+# result, follow-up) then re-prefilled the whole conversation. The server log shows the
+# hit: the follow-up must reuse at least the whole prompt of the tool-call turn.
+log "Test 15: a tool-call-only turn saves the prompt cache"
+SERVER_LOG=/tmp/SwiftLM-test-contract.log
+hit_count() { grep -c 'Prompt cache HIT' "$SERVER_LOG" || true; }
+last_hit_reused() { grep -o 'Prompt cache HIT[^:]*: [0-9]*' "$SERVER_LOG" | tail -1 | grep -o '[0-9]*$'; }
+# Reads a non-streaming response or an SSE stream (with include_usage) and prints
+# "<first tool name> <prompt_tokens>".
+tool_turn_summary() {
+    python3 -c '
+import json, sys
+raw = sys.stdin.read()
+if raw.lstrip().startswith("{"):
+    r = json.loads(raw); m = r["choices"][0]["message"]
+    name = ((m.get("tool_calls") or [{}])[0].get("function") or {}).get("name", "")
+    print(name, r.get("usage", {}).get("prompt_tokens", 0)); sys.exit()
+name, prompt = "", 0
+for line in raw.splitlines():
+    if not line.startswith("data: {"): continue
+    ev = json.loads(line[6:])
+    for c in ev.get("choices") or []:
+        for tc in (c.get("delta") or {}).get("tool_calls") or []:
+            name = name or (tc.get("function") or {}).get("name", "")
+    prompt = (ev.get("usage") or {}).get("prompt_tokens") or prompt
+print(name, prompt)'
+}
+# $1: label, $2: a system prompt no other test uses, $3: extra fields for the tool-call turn.
+tool_turn_then_follow_up() {
+    local LABEL="$1" SYS="$2" EXTRA="$3"
+    local HISTORY="{\"role\":\"system\",\"content\":\"$SYS\"},{\"role\":\"user\",\"content\":\"What is the weather in Paris? Use the tool.\"}"
+    local SUMMARY NAME PROMPT_TOKENS HITS_BEFORE REUSED
+    SUMMARY=$(chat "{\"model\":\"x\",\"messages\":[$HISTORY],\"tools\":$TOOLS,\"max_tokens\":200,\"temperature\":0$EXTRA}" | tool_turn_summary)
+    NAME=${SUMMARY%% *}; PROMPT_TOKENS=${SUMMARY##* }
+    if [ "$NAME" != "get_weather" ]; then
+        skip "$LABEL: model did not answer with a tool call (capability, not contract)"
+        return
+    fi
+    HITS_BEFORE=$(hit_count)
+    # The follow-up replays the tool call and adds its result; its prompt starts with the
+    # whole prompt of the tool-call turn, which must now be in the cache.
+    chat "{\"model\":\"x\",\"messages\":[$HISTORY,{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"call_15\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\": \\\"Paris\\\"}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call_15\",\"content\":\"18 C, cloudy\"}],\"tools\":$TOOLS,\"max_tokens\":40,\"temperature\":0}" >/dev/null
+    for _ in $(seq 1 20); do
+        [ "$(hit_count)" -gt "$HITS_BEFORE" ] && break
+        sleep 0.25
+    done
+    if [ "$(hit_count)" -le "$HITS_BEFORE" ]; then
+        fail "$LABEL: the follow-up after a tool-call turn got no prompt cache hit at all"
+        return
+    fi
+    REUSED=$(last_hit_reused)
+    if [ "${REUSED:-0}" -ge "$PROMPT_TOKENS" ]; then
+        pass "$LABEL: the follow-up reused $REUSED cached tokens, the tool-call turn's prompt was $PROMPT_TOKENS"
+    else
+        fail "$LABEL: the follow-up reused only $REUSED cached tokens; the tool-call turn's prompt was $PROMPT_TOKENS"
+    fi
+}
+tool_turn_then_follow_up "non-streaming" "You are a weather desk. Call get_weather for any weather question and say nothing else." ""
+tool_turn_then_follow_up "streaming" "You are a weather kiosk. Call get_weather for any weather question and say nothing else." ',"stream":true,"stream_options":{"include_usage":true}'
+
 log "═══════════════════════════════════════"
 log "Results: $PASS passed, $FAIL failed, $SKIP skipped, $TOTAL total"
 log "═══════════════════════════════════════"

@@ -439,7 +439,7 @@ fi
 # #245: the save at `.info` waited for a text chunk, and a turn the model answers with
 # nothing but a tool call never produces one. The next turn of an agent loop (tool
 # result, follow-up) then re-prefilled the whole conversation. The server log shows the
-# hit: the follow-up must reuse at least the whole prompt of the tool-call turn.
+# hit: the follow-up must reuse the prompt of the tool-call turn (less its last token).
 log "Test 15: a tool-call-only turn saves the prompt cache"
 SERVER_LOG=/tmp/SwiftLM-test-contract.log
 hit_count() { grep -c 'Prompt cache HIT' "$SERVER_LOG" || true; }
@@ -488,7 +488,9 @@ tool_turn_then_follow_up() {
         return
     fi
     REUSED=$(last_hit_reused)
-    if [ "${REUSED:-0}" -ge "$PROMPT_TOKENS" ]; then
+    # The prompt is saved at the turn boundary without its last token (that token is fed to
+    # start generation), so the entry is one token short of the prompt.
+    if [ "${REUSED:-0}" -ge $((PROMPT_TOKENS - 1)) ]; then
         pass "$LABEL: the follow-up reused $REUSED cached tokens, the tool-call turn's prompt was $PROMPT_TOKENS"
     else
         fail "$LABEL: the follow-up reused only $REUSED cached tokens; the tool-call turn's prompt was $PROMPT_TOKENS"
@@ -496,6 +498,60 @@ tool_turn_then_follow_up() {
 }
 tool_turn_then_follow_up "non-streaming" "You are a weather desk. Call get_weather for any weather question and say nothing else." ""
 tool_turn_then_follow_up "streaming" "You are a weather kiosk. Call get_weather for any weather question and say nothing else." ',"stream":true,"stream_options":{"include_usage":true}'
+
+# ── 16. A turn that ends early still saves the prompt cache ──────────────────
+# #245: the save moved to the producer's `.info`, which a stop sequence or a client
+# disconnect never reaches, so the next turn re-prefilled the whole history. The prompt is
+# now saved at the turn boundary, before generation starts. The follow-up repeats the
+# first turn and adds a short exchange, so it must reuse nearly all of its own prompt.
+log "Test 16: a turn that ends on a stop sequence or a disconnect saves the prompt cache"
+# $1: label, $2: a tag no other test uses, $3: stop sequence ("" for none), $4: "leave" to
+# disconnect after the first streamed token.
+early_exit_then_follow_up() {
+    local LABEL="$1" TAG="$2" STOP="$3" MODE="$4"
+    local SYS HISTORY HITS_BEFORE REUSED FOLLOW PROMPT_TOKENS
+    SYS="Scenario $TAG. You are a terse assistant. $(python3 -c 'print("The committee reviews the quarterly infrastructure budget and the migration schedule for the storage cluster. " * 30)')"
+    HISTORY="{\"role\":\"system\",\"content\":\"$SYS\"},{\"role\":\"user\",\"content\":\"Name three rivers, one sentence.\"}"
+    if [ "$MODE" = "leave" ]; then
+        HOST="$HOST" PORT="$PORT" HISTORY="$HISTORY" python3 - <<'PY'
+import http.client, json, os
+body = '{"model":"x","stream":true,"max_tokens":200,"temperature":0,"messages":[' + os.environ["HISTORY"] + ']}'
+conn = http.client.HTTPConnection(os.environ["HOST"], int(os.environ["PORT"]), timeout=120)
+conn.request("POST", "/v1/chat/completions", body, {"Content-Type": "application/json"})
+resp = conn.getresponse()
+for line in resp:
+    line = line.decode().strip()
+    if line.startswith("data: {"):
+        ch = json.loads(line[6:]).get("choices") or []
+        if ch and (ch[0].get("delta") or {}).get("content"):
+            break
+conn.close()
+PY
+    else
+        chat "{\"model\":\"x\",\"messages\":[$HISTORY],\"max_tokens\":60,\"temperature\":0,\"stop\":[\"$STOP\"]}" >/dev/null
+    fi
+    sleep 1
+    HITS_BEFORE=$(hit_count)
+    FOLLOW=$(chat "{\"model\":\"x\",\"messages\":[$HISTORY,{\"role\":\"assistant\",\"content\":\"Three rivers are\"},{\"role\":\"user\",\"content\":\"Now name three lakes.\"}],\"max_tokens\":4,\"temperature\":0}")
+    PROMPT_TOKENS=$(echo "$FOLLOW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["usage"]["prompt_tokens"])')
+    for _ in $(seq 1 20); do
+        [ "$(hit_count)" -gt "$HITS_BEFORE" ] && break
+        sleep 0.25
+    done
+    if [ "$(hit_count)" -le "$HITS_BEFORE" ]; then
+        fail "$LABEL: the follow-up got no prompt cache hit at all"
+        return
+    fi
+    REUSED=$(last_hit_reused)
+    # The follow-up adds an assistant reply and a user message on top of the first turn.
+    if [ "${REUSED:-0}" -ge $((PROMPT_TOKENS - 60)) ]; then
+        pass "$LABEL: the follow-up reused $REUSED of its $PROMPT_TOKENS prompt tokens"
+    else
+        fail "$LABEL: the follow-up reused only $REUSED of its $PROMPT_TOKENS prompt tokens"
+    fi
+}
+early_exit_then_follow_up "stop sequence" "stop-seq" "the" ""
+early_exit_then_follow_up "client disconnect" "disconnect" "" "leave"
 
 log "═══════════════════════════════════════"
 log "Results: $PASS passed, $FAIL failed, $SKIP skipped, $TOTAL total"

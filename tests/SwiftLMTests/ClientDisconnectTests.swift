@@ -90,7 +90,7 @@ final class ClientDisconnectTests: XCTestCase {
             while !Task.isCancelled {
                 if case .terminated = continuation.yield(.chunk("x", tokenId: token)) { return }
                 token += 1
-                try? await Task.sleep(for: .milliseconds(2))
+                try? await Task.sleep(nanoseconds: 2_000_000)
             }
         }
         return (stream, producer)
@@ -119,7 +119,7 @@ final class ClientDisconnectTests: XCTestCase {
             }
         }
         // Let it consume a few chunks, then the client goes away.
-        try await Task.sleep(for: .milliseconds(40))
+        try await Task.sleep(nanoseconds: 40_000_000)
         channel.pipeline.fireUserInboundEventTriggered(ChannelEvent.inputClosed)
 
         _ = try await response.value
@@ -129,7 +129,7 @@ final class ClientDisconnectTests: XCTestCase {
         let released = Task { await semaphore.wait(); return true }
         let reacquired = await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask { await released.value }
-            group.addTask { try? await Task.sleep(for: .seconds(2)); return false }
+            group.addTask { try? await Task.sleep(nanoseconds: 2_000_000_000); return false }
             let first = await group.next() ?? false
             group.cancelAll()
             return first
@@ -174,7 +174,7 @@ final class ClientDisconnectTests: XCTestCase {
     func testDeferredCancellationCancelsATaskAttachedAfterTheRequest() async {
         let cancellation = DeferredCancellation()
         cancellation.cancel()
-        let task = Task { try await Task.sleep(for: .seconds(10)) }
+        let task = Task { try await Task.sleep(nanoseconds: 10_000_000_000) }
         cancellation.attach(task)
         if case .success = await task.result { XCTFail("the task should have been cancelled") }
     }

@@ -47,7 +47,7 @@ final class DFlashStreamBridgeTests: XCTestCase {
                     while !Task.isCancelled {
                         counter += 1
                         continuation.yield(.token(tokenID: counter, generatedTokens: counter, acceptanceRatio: 0, cyclesCompleted: counter))
-                        try? await Task.sleep(for: .milliseconds(5))
+                        try? await Task.sleep(nanoseconds: 5_000_000)
                     }
                     continuation.finish()
                 }

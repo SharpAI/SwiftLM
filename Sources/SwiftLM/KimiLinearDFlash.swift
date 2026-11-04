@@ -140,7 +140,7 @@ public struct KimiLinearConfiguration: Codable, Sendable {
 
 // MARK: - KimiMLP
 
-private class KimiMLP: Module, UnaryLayer {
+class KimiMLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gate: Linear
     @ModuleInfo(key: "up_proj") var up: Linear
     @ModuleInfo(key: "down_proj") var down: Linear
@@ -151,7 +151,7 @@ private class KimiMLP: Module, UnaryLayer {
         _down.wrappedValue = Linear(hiddenDimensions, dimensions, bias: false)
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray { down(gate(x) * silu(up(x))) }
+    func callAsFunction(_ x: MLXArray) -> MLXArray { down(silu(gate(x)) * up(x)) }
 }
 
 // MARK: - KimiMultiLinear

@@ -160,6 +160,12 @@ public final class HFModelSearchService: ObservableObject {
     private var currentSort = HFSortOption.trending
     private var currentSizeFilter = HFSizeFilter.all
     private var debounceTask: Task<Void, Never>? = nil
+    /// Counts searches. A page fetch remembers the count it started under and publishes
+    /// nothing once a newer search has started: cancelling the debounce task does not stop
+    /// a fetch that is already awaiting the network, and a `loadMore()` fetch is not in
+    /// that task at all. Before this, a superseded fetch wrote "Search failed: cancelled"
+    /// and `isSearching = false` over the search that replaced it.
+    private var generation = 0
 
     private init() {}
 
@@ -168,6 +174,7 @@ public final class HFModelSearchService: ObservableObject {
     /// Debounced search — safe to call on every keystroke.
     public func search(query: String, sort: HFSortOption = .trending, sizeFilter: HFSizeFilter = .all) {
         debounceTask?.cancel()
+        generation += 1
         debounceTask = Task {
             // 300ms debounce
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -225,6 +232,10 @@ public final class HFModelSearchService: ObservableObject {
 
     private func fetchPage() async {
         print("HFSearch: fetchPage started. Query: '\(currentQuery)' Sort: \(currentSort.rawValue)")
+        let generation = self.generation
+        // True once a newer search has started (or this fetch's task was cancelled with
+        // it): the published state belongs to that search, so this one stops here.
+        func superseded() -> Bool { Task.isCancelled || generation != self.generation }
         isSearching = true
         errorMessage = nil
 
@@ -233,7 +244,9 @@ public final class HFModelSearchService: ObservableObject {
         // and hit the model detail endpoint. This is needed because the HF
         // search API filters on pipeline_tag which many MLX uploads don't match.
         if isDirectRepoQuery(currentQuery) {
-            if let result = await fetchDirectRepo(currentQuery) {
+            let result = await fetchDirectRepo(currentQuery)
+            if superseded() { return }
+            if let result {
                 results = [result]
             } else {
                 // Also try with prefix variants (e.g. user typed partial name without quant suffix)
@@ -283,6 +296,7 @@ public final class HFModelSearchService: ObservableObject {
             
             do {
                 let (data, response) = try await URLSession.shared.data(from: urlToFetch)
+                if superseded() { return }
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                     errorMessage = "HuggingFace API unavailable"
                     break
@@ -335,6 +349,7 @@ public final class HFModelSearchService: ObservableObject {
                             if let size = size { page[index].usedStorage = size }
                         }
                     }
+                    if superseded() { return }
                     localResults.append(contentsOf: page)
                 }
 
@@ -345,17 +360,22 @@ public final class HFModelSearchService: ObservableObject {
                     hasMore = true
                 }
             } catch is CancellationError {
-                break
+                return
+            } catch let error as URLError where error.code == .cancelled {
+                // The request was cancelled with this fetch's task: a newer search's doing.
+                return
             } catch {
+                if superseded() { return }
                 errorMessage = "Search failed: \(error.localizedDescription)"
                 break
             }
         }
 
+        if superseded() { return }
         if !localResults.isEmpty {
             results.append(contentsOf: localResults)
         }
-        
+
         isSearching = false
         print("HFSearch: fetchPage finished")
     }

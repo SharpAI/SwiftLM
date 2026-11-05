@@ -322,4 +322,62 @@ final class ChatRequestParsingTests: XCTestCase {
         XCTAssertEqual(req.maxCompletionTokens, 64)
         XCTAssertNil(req.maxTokens)
     }
+
+    // MARK: - chat_template_kwargs is passed to the template as sent (#259)
+
+    /// The field decoded as `[String: Bool]`, so a string or a number anywhere in it failed
+    /// the whole request, and only `enable_thinking` was read. Templates take other names
+    /// and types: DeepSeek-V3.1 `thinking`, gpt-oss `reasoning_effort` and `model_identity`.
+    func testChatTemplateKwargsDecodeAnyJSONValue() throws {
+        let req = try decode("""
+        {
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": {
+                "enable_thinking": false,
+                "thinking": true,
+                "reasoning_effort": "high",
+                "budget": 3,
+                "nested": {"a": [1, "b", null]}
+            }
+        }
+        """)
+        let kwargs = try XCTUnwrap(req.chatTemplateKwargs)
+        XCTAssertEqual(kwargs["enable_thinking"]?.value as? Bool, false)
+        XCTAssertEqual(kwargs["thinking"]?.value as? Bool, true)
+        XCTAssertEqual(kwargs["reasoning_effort"]?.value as? String, "high")
+        XCTAssertEqual(kwargs["budget"]?.value as? Int, 3)
+        let nested = try XCTUnwrap(kwargs["nested"]?.value as? [String: Any])
+        let list = try XCTUnwrap(nested["a"] as? [Any])
+        XCTAssertEqual(list.count, 3)
+        XCTAssertEqual(list[0] as? Int, 1)
+        XCTAssertEqual(list[1] as? String, "b")
+        XCTAssertTrue(list[2] is NSNull)
+    }
+
+    func testChatTemplateKwargsAbsentDecodesToNil() throws {
+        let req = try decode(#"{"messages":[{"role":"user","content":"hi"}]}"#)
+        XCTAssertNil(req.chatTemplateKwargs)
+    }
+
+    /// Every kwarg reaches the template context; `enable_thinking` carries the verdict of
+    /// the precedence rules in `handleChatCompletion`, not the raw kwarg.
+    func testChatTemplateContextForwardsEveryKwargAndSetsEnableThinking() throws {
+        let req = try decode("""
+        {
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": {"enable_thinking": true, "thinking": true, "reasoning_effort": "low"}
+        }
+        """)
+        let context = chatTemplateContext(kwargs: req.chatTemplateKwargs, enableThinking: false)
+        XCTAssertEqual(context["enable_thinking"] as? Bool, false)
+        XCTAssertEqual(context["thinking"] as? Bool, true)
+        XCTAssertEqual(context["reasoning_effort"] as? String, "low")
+        XCTAssertEqual(context.count, 3)
+    }
+
+    func testChatTemplateContextWithoutKwargsHasOnlyEnableThinking() {
+        let context = chatTemplateContext(kwargs: nil, enableThinking: true)
+        XCTAssertEqual(context["enable_thinking"] as? Bool, true)
+        XCTAssertEqual(context.count, 1)
+    }
 }

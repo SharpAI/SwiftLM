@@ -553,6 +553,31 @@ PY
 early_exit_then_follow_up "stop sequence" "stop-seq" "the" ""
 early_exit_then_follow_up "client disconnect" "disconnect" "" "leave"
 
+# ── 17. chat_template_kwargs is passed to the template as sent ──────────────
+# #259: the field decoded as [String: Bool], so a string or a number anywhere in it was a
+# 400, and every key but enable_thinking was dropped before the template saw it. Templates
+# read other names (DeepSeek-V3.1 `thinking`, gpt-oss `reasoning_effort`). The CI model's
+# template ignores names it does not know, so this checks the wire contract only: any JSON
+# value is accepted, and a non-boolean enable_thinking is still refused by name.
+log "Test 17: chat_template_kwargs takes any JSON value"
+KW=$(chat '{"model":"x","messages":[{"role":"user","content":"Say hello in one short sentence."}],"max_tokens":16,"temperature":0,"chat_template_kwargs":{"reasoning_effort":"low","budget":3,"thinking":true,"nested":{"a":[1,"b"]}}}' || true)
+KW_CONTENT=$(echo "$KW" | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"].get("content") or "")' 2>/dev/null || echo "__no_body__")
+if [ "$KW_CONTENT" = "__no_body__" ] || [ -z "$KW_CONTENT" ]; then
+    fail "string, number and nested kwargs were rejected: $(echo "$KW" | head -c 160)"
+else
+    pass "string, number, boolean and nested kwargs are accepted"
+fi
+
+log "Test 17b: a non-boolean enable_thinking is a 400 that names the param"
+CODE=$(curl -s -o /tmp/SwiftLM-contract-kwargs.json -w '%{http_code}' "$URL/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d '{"model":"x","messages":[{"role":"user","content":"hi"}],"max_tokens":4,"chat_template_kwargs":{"enable_thinking":"yes"}}')
+ERR_TYPE=$(python3 -c 'import json; e=json.load(open("/tmp/SwiftLM-contract-kwargs.json"))["error"]; print(e.get("type"), e.get("param"))' 2>/dev/null || echo "unparseable")
+if [ "$CODE" = "400" ] && [ "$ERR_TYPE" = "invalid_request_error chat_template_kwargs.enable_thinking" ]; then
+    pass "400 invalid_request_error naming param 'chat_template_kwargs.enable_thinking'"
+else
+    fail "got HTTP $CODE with error '$ERR_TYPE' (expected 400 invalid_request_error chat_template_kwargs.enable_thinking)"
+fi
+
 log "═══════════════════════════════════════"
 log "Results: $PASS passed, $FAIL failed, $SKIP skipped, $TOTAL total"
 log "═══════════════════════════════════════"

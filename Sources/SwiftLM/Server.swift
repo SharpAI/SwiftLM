@@ -2516,6 +2516,18 @@ func handleChatCompletion(
         )
     }
 
+    // ── chat_template_kwargs is free-form JSON, but enable_thinking stays a boolean ──
+    // It decides the precedence below, so a string or a number there is a client error,
+    // answered the way the whole field used to be answered before it took other types.
+    if let raw = chatReq.chatTemplateKwargs?["enable_thinking"], !(raw.value is Bool) {
+        let errBody = "{\"error\":{\"message\":\"Invalid type for 'chat_template_kwargs.enable_thinking': expected a boolean.\",\"type\":\"invalid_request_error\",\"param\":\"chat_template_kwargs.enable_thinking\"}}"
+        return Response(
+            status: .badRequest,
+            headers: jsonHeaders(),
+            body: .init(byteBuffer: ByteBuffer(string: errBody))
+        )
+    }
+
     var generateParams = GenerateParameters(
         maxTokens: tokenLimit,
         maxKVSize: config.ctxSize,
@@ -2583,7 +2595,7 @@ func handleChatCompletion(
     var enableThinking: Bool
     if let explicitTopLevel = chatReq.enableThinking {
         enableThinking = explicitTopLevel
-    } else if let kwargs = chatReq.chatTemplateKwargs, let perRequest = kwargs["enable_thinking"] {
+    } else if let perRequest = chatReq.chatTemplateKwargs?["enable_thinking"]?.value as? Bool {
         enableThinking = perRequest  // per-request override wins
     } else {
         enableThinking = config.thinking  // fall back to server --thinking flag
@@ -2617,7 +2629,8 @@ func handleChatCompletion(
 
     // The Jinja template evaluates `not enable_thinking | default(false)`. If we pass nil instead of
     // true, it evaluates to false and still breaks. We MUST explicitly pass the boolean.
-    let templateContext: [String: any Sendable] = ["enable_thinking": enableThinking]
+    let templateContext = chatTemplateContext(
+        kwargs: chatReq.chatTemplateKwargs, enableThinking: enableThinking)
     let userInput = UserInput(chat: chatMessages, tools: toolSpecs, additionalContext: templateContext)
     print("[Server Debug] Created UserInput with \(userInput.images.count) images and \(userInput.audios.count) audio inputs.")
     let lmInput = try await container.prepare(input: userInput)
@@ -4419,6 +4432,18 @@ func checkStopSequences(_ text: String, stopSequences: [String], lookback: Int? 
     return (String(text[text.startIndex..<earliest.index]), earliest.stop)
 }
 
+/// The `additionalContext` a chat request hands to its chat template: every
+/// `chat_template_kwargs` entry as the client sent it, with `enable_thinking` set to the
+/// value the request's precedence rules decided (top-level field, then the kwarg, then the
+/// server flag). Templates read their own names here (`thinking`, `reasoning_effort`,
+/// `model_identity`, …), so nothing but that one key is interpreted by the server.
+/// Nulls inside the values are stripped later by `sanitizeForJinja`, as for tools.
+func chatTemplateContext(kwargs: [String: AnyCodable]?, enableThinking: Bool) -> [String: any Sendable] {
+    var context = AnyCodable.toSendable(kwargs) ?? [:]
+    context["enable_thinking"] = enableThinking
+    return context
+}
+
 /// The sampler seed for a request `seed`. OpenAI's `seed` is a plain integer, so negative
 /// values do arrive, and `UInt64(seed)` trapped on them — one such request took the whole
 /// server down (#219). Taking the bit pattern keeps every distinct Int a distinct seed.
@@ -4920,8 +4945,11 @@ struct ChatCompletionRequest: Decodable {
     let seed: Int?
     let streamOptions: StreamOptions?
     let responseFormat: ResponseFormat?
-    /// Per-request Jinja template kwargs (e.g. {"enable_thinking": false} for Qwen3/Qwen3.5)
-    let chatTemplateKwargs: [String: Bool]?
+    /// Per-request Jinja template kwargs, passed to the chat template as sent: any JSON
+    /// value, since templates read more than booleans (`{"enable_thinking": false}` for
+    /// Qwen3, `{"thinking": true}` for DeepSeek V3.1, `{"reasoning_effort": "high"}` for
+    /// gpt-oss). `enable_thinking` keeps its own precedence rules in `handleChatCompletion`.
+    let chatTemplateKwargs: [String: AnyCodable]?
     /// Per-request reasoning-token cap; overrides `--thinking-budget`.
     let thinkingBudget: Int?
     /// Top-level thinking override emitted by Aegis-AI gateway

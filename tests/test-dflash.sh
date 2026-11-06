@@ -219,18 +219,22 @@ fi
 # a capability, not a contract, so a reply without any tool-call shape reports SKIP.
 log "Test 4b: a tool call under DFlash arrives as tool_calls, not as text"
 TOOLS='[{"type":"function","function":{"name":"get_weather","description":"Get the current weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]'
+TOOL_RC=0
 TOOL_RESP=$(curl -sf --max-time 180 -X POST "$URL/v1/chat/completions" \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MAIN_MODEL\",\"max_tokens\":120,\"temperature\":0,\"tools\":$TOOLS,\"messages\":[{\"role\":\"system\",\"content\":\"You are a weather kiosk. Call get_weather for any weather question and say nothing else.\"},{\"role\":\"user\",\"content\":\"What is the weather in Paris right now?\"}]}" 2>/dev/null || echo "")
+    -d "{\"model\":\"$MAIN_MODEL\",\"max_tokens\":120,\"temperature\":0,\"tools\":$TOOLS,\"messages\":[{\"role\":\"system\",\"content\":\"You are a weather kiosk. Call get_weather for any weather question and say nothing else.\"},{\"role\":\"user\",\"content\":\"What is the weather in Paris right now?\"}]}" 2>/dev/null) || TOOL_RC=$?
 TOOL_NAME=$(echo "$TOOL_RESP" | jq -r '.choices[0].message.tool_calls[0].function.name // empty' 2>/dev/null || echo "")
 TOOL_CONTENT=$(echo "$TOOL_RESP" | jq -r '.choices[0].message.content // empty' 2>/dev/null || echo "")
 TOOL_FINISH=$(echo "$TOOL_RESP" | jq -r '.choices[0].finish_reason // empty' 2>/dev/null || echo "")
-# SKIP is reserved for a reply with no tool-call shape at all. A failed request (HTTP error
-# or timeout) and a parsed tool call with the wrong finish_reason are regressions, so FAIL.
+# SKIP is reserved for a reply with no tool-call shape at all. A failed request (HTTP error,
+# timeout, or a body cut off mid-way), a 200 that is not a chat completion, and a parsed tool
+# call with the wrong finish_reason are regressions, so FAIL.
 if [ "$TOOL_NAME" = "get_weather" ] && [ "$TOOL_FINISH" = "tool_calls" ]; then
     pass "DFlash tool call parsed: tool_calls[0]=get_weather, finish_reason=tool_calls"
-elif [ -z "$TOOL_RESP" ]; then
-    fail "tool request failed (HTTP error or timeout)"
+elif [ "$TOOL_RC" -ne 0 ]; then
+    fail "tool request failed (curl exit $TOOL_RC: HTTP error, timeout, or body cut off)"
+elif ! echo "$TOOL_RESP" | jq -e '.choices[0]' >/dev/null 2>&1; then
+    fail "tool response is not a chat completion (no choices): $(echo "$TOOL_RESP" | head -c 120)"
 elif [ -n "$TOOL_NAME" ]; then
     fail "tool call parsed but finish_reason=$TOOL_FINISH"
 elif echo "$TOOL_CONTENT" | grep -q "tool_call\|get_weather"; then

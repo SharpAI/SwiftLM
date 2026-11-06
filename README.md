@@ -687,6 +687,7 @@ In addition to the standard OpenAI fields (`temperature`, `top_p`, `max_tokens`,
 |---|---|---|
 | `kv_bits` | `int` (4 or 8) | Enable **MLX-native quantized KV cache** for this request. Uses `QuantizedKVCache` (standard group quantization) instead of `KVCacheSimple`. Separate from `--turbo-kv`. Reduces KV memory ~2–4× at mild quality cost. |
 | `enable_thinking` | `bool` | Force-enable or disable chain-of-thought thinking blocks for Gemma-4 / Qwen3. |
+| `chat_template_kwargs` | `object` | Passed to the chat template as sent, any JSON value: `{"thinking": true}` for DeepSeek V3.1, `{"reasoning_effort": "high"}` for gpt-oss. An `enable_thinking` inside it is overridden by the top-level field above. |
 | `kv_group_size` | `int` | Group size for `kv_bits` quantization (default: `64`). |
 | `top_k` | `int` | Per-request top-k sampling override (0 = disabled). |
 | `min_p` | `float` | Per-request min-p sampling threshold (0 = disabled). |

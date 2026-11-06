@@ -50,6 +50,32 @@ final class HFModelSearchTests: XCTestCase {
         XCTAssertNil(service.errorMessage)
     }
     
+    /// A search that replaces one still awaiting the network must not inherit its state.
+    /// The replaced fetch's request is cancelled, which it used to report as
+    /// "Search failed: cancelled" over the new search, and it also cleared `isSearching`
+    /// while the new search was still running. That is the flake CI hit in
+    /// testStrictMLXFilterDisabled whenever an earlier test left a fetch in flight.
+    @MainActor
+    func testSupersededSearchPublishesNothing() async throws {
+        let service = HFModelSearchService.shared
+        service.errorMessage = nil
+        service.results = []
+        service.strictMLX = true
+
+        service.search(query: "gpt", sort: .trending)
+        // Past the 300 ms debounce, so the first fetch is on the wire when it is replaced.
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        service.search(query: "mistral", sort: .trending)
+
+        for _ in 0..<40 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            if !service.isSearching && service.results.count > 0 { break }
+        }
+
+        try XCTSkipIf(service.isSearching || service.results.count == 0, "Skipping due to transient HF rate limiting on GitHub Actions IP bounds")
+        XCTAssertNil(service.errorMessage, "the replaced search's cancellation leaked into the new search")
+    }
+
     // Feature 3: Empty query trending
     @MainActor
     func testFeature3_EmptyQueryTrending() async throws {

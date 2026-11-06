@@ -2411,12 +2411,6 @@ func stopTokenIDs(
     return ids.sorted()
 }
 
-/// Mutable detokenizer shared with the bridge task in `dflashGenerationStream`.
-private final class DetokenizerBox: @unchecked Sendable {
-    var detokenizer: NaiveStreamingDetokenizer
-    init(_ d: NaiveStreamingDetokenizer) { self.detokenizer = d }
-}
-
 /// Bridges a DFlash event stream to the `Generation` stream the handlers consume.
 ///
 /// When the consumer stops early — a text-level stop sequence, a client disconnect — the
@@ -2425,30 +2419,64 @@ private final class DetokenizerBox: @unchecked Sendable {
 /// the bridge was a bare `Task` nobody cancelled, so the DFlash loop ran on to
 /// `max_tokens` after the response had ended and the next request's generation
 /// overlapped it (#224).
-func dflashGenerationStream(
+///
+/// Every token goes through `handler`, the same `TokenLoopHandler` the standard path
+/// runs its tokens through, so a tool call, a rejected tool call and the model's own
+/// stop strings come out the same under `--dflash`. With a bare detokenizer here, a
+/// tool call reached the client as plain text. `stopTokenIDs` are the ids DFlash itself
+/// stops on; the handler sees them through `onStopToken`, as in the standard loop.
+func dflashGenerationStream<Handler: TokenLoopHandler>(
     _ events: AsyncStream<DFlashEvent>,
     tokenLimit: Int,
-    nextText: @escaping @Sendable (Int) -> String?
-) -> AsyncStream<Generation> {
+    stopTokenIDs: Set<Int>,
+    handler: Handler
+) -> AsyncStream<Generation> where Handler.Output == Generation {
     AsyncStream<Generation> { continuation in
-        let bridge = Task {
+        let bridge = Task { [handler] in
+            var handler = handler
+            let emit: (sending Generation) -> Bool = { continuation.yield($0); return true }
+            let started = Date()
+            var promptTokenCount = 0
+            var prefillSeconds = 0.0
+            var generated = 0
             for await event in events {
                 if Task.isCancelled { break }
                 switch event {
-                case .token(let tokenID, _, _, _):
-                    if let chunk = nextText(tokenID) {
-                        continuation.yield(.chunk(chunk, tokenId: tokenID))
-                    }
-                case .prefill, .prefillProgress:
+                case .prefill(let count, let prefillUs):
+                    promptTokenCount = count
+                    prefillSeconds = prefillUs / 1_000_000.0
+                case .prefillProgress:
                     break
+                case .token(let tokenID, let generatedTokens, _, _):
+                    generated = generatedTokens
+                    let disposition = stopTokenIDs.contains(tokenID)
+                        ? handler.onStopToken(tokenID, logProbabilities: nil, emit: emit)
+                        : handler.onToken(tokenID, logProbabilities: nil, emit: emit)
+                    if case .more = disposition { continue }
+                    // The handler ended the generation (one of the model's stop strings):
+                    // flush it and close with the counts so far, then cancel this task so
+                    // the next wait on `events` cancels the DFlash stream and its producer
+                    // stops computing (#224), instead of running on to max_tokens.
+                    _ = handler.onGenerationEnd(emit: emit)
+                    continuation.yield(handler.infoEvent(GenerateCompletionInfo(
+                        promptTokenCount: promptTokenCount,
+                        generationTokenCount: generated,
+                        promptTime: prefillSeconds,
+                        generationTime: max(0, Date().timeIntervalSince(started) - prefillSeconds),
+                        stopReason: .stop
+                    )))
+                    withUnsafeCurrentTask { $0?.cancel() }
                 case .summary(let summary):
                     print("[SwiftLM] DFlash summary: \(summary.generationTokens) tokens, \(String(format: "%.1f", summary.tokensPerSecond)) tok/s, acceptance=\(String(format: "%.1f%%", summary.acceptanceRatio * 100)), \(summary.cyclesCompleted) cycles")
+                    // Text the handler is still holding (a tag it was watching) goes out
+                    // before the end of the generation is announced.
+                    _ = handler.onGenerationEnd(emit: emit)
                     // The SSE/non-streaming handlers emit finish_reason, usage and
                     // `[DONE]` from `.info`. Without it, a DFlash run that ends on EOS
                     // or max_tokens (rather than a textual stop sequence) closes the
                     // stream with no `[DONE]` sentinel.
                     let prefillSec = summary.phaseTimingsUs.prefill / 1_000_000.0
-                    continuation.yield(.info(GenerateCompletionInfo(
+                    continuation.yield(handler.infoEvent(GenerateCompletionInfo(
                         promptTokenCount: summary.promptTokenCount,
                         generationTokenCount: summary.generationTokens,
                         promptTime: prefillSec,
@@ -2704,25 +2732,37 @@ func handleChatCompletion(
         // Convert DFlashEvent stream to Generation stream with proper streaming detokenizer
         let dflashTokenizer = await container.tokenizer
         let dflashConfiguration = await container.configuration
+        // The token handler the standard path uses (`generate` in mlx-swift-lm builds the
+        // same one): it turns the model's tool-call protocol into `.toolCall` events and
+        // honours the model's stop strings. Reasoning stays nil here as on the standard
+        // path, since this server splits `<think>` out of the text itself.
+        let dflashHandler = TextToolTokenLoopHandler(
+            tokenizer: dflashTokenizer,
+            stopStrings: dflashConfiguration.effectiveStopStrings,
+            format: dflashConfiguration.toolCallFormat ?? .json,
+            tools: toolSpecs,
+            toolCallPolicy: params.toolCallPolicy,
+            reasoning: nil)
+        // The end-of-sequence set the standard path stops on. Without it DFlash ran
+        // to max_tokens past `<|im_end|>` (#224). The handler may add ids of its own,
+        // as it does in the standard loop.
+        let dflashStopTokenIDs = Set(stopTokenIDs(
+            eosTokenIDs: dflashConfiguration.eosTokenIds,
+            tokenizerEOS: dflashTokenizer.eosTokenId,
+            extraEOSTokens: dflashConfiguration.extraEOSTokens,
+            tokenID: dflashTokenizer.convertTokenToId)
+        ).union(dflashHandler.additionalStopTokenIDs)
         let dflashStream = DFlashRuntime.generate(
             targetModel: targetModel,
             draftModel: dflashDraft,
             promptTokens: promptTokens,
             maxNewTokens: tokenLimit,
             blockTokens: dflashBlockSize,
-            // The end-of-sequence set the standard path stops on. Without it DFlash ran
-            // to max_tokens past `<|im_end|>` (#224).
-            stopTokenIDs: stopTokenIDs(
-                eosTokenIDs: dflashConfiguration.eosTokenIds,
-                tokenizerEOS: dflashTokenizer.eosTokenId,
-                extraEOSTokens: dflashConfiguration.extraEOSTokens,
-                tokenID: dflashTokenizer.convertTokenToId)
+            stopTokenIDs: Array(dflashStopTokenIDs)
         )
-        let box = DetokenizerBox(NaiveStreamingDetokenizer(tokenizer: dflashTokenizer))
-        let genStream = dflashGenerationStream(dflashStream, tokenLimit: tokenLimit) { tokenID in
-            box.detokenizer.append(token: tokenID)
-            return box.detokenizer.next()
-        }
+        let genStream = dflashGenerationStream(
+            dflashStream, tokenLimit: tokenLimit, stopTokenIDs: dflashStopTokenIDs,
+            handler: dflashHandler)
 
         return (genStream, nil)
     }

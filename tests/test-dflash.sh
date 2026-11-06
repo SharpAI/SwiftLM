@@ -27,6 +27,7 @@ NUM_DRAFT_TOKENS=16
 URL="http://${HOST}:${PORT}"
 PASS=0
 FAIL=0
+SKIP=0
 TOTAL=0
 LOG_FILE="/tmp/SwiftLM-test-dflash.log"
 
@@ -40,6 +41,8 @@ NC='\033[0m'
 log()  { echo -e "${YELLOW}[dflash-test]${NC} $*"; }
 pass() { PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}✅ PASS${NC}: $*"; }
 fail() { FAIL=$((FAIL + 1)); TOTAL=$((TOTAL + 1)); echo -e "  ${RED}❌ FAIL${NC}: $*"; }
+# A capability the model may lack is not a contract failure: it reports SKIP, as in test-contract.sh.
+skip() { SKIP=$((SKIP + 1)); TOTAL=$((TOTAL + 1)); echo -e "  ⏭️  SKIP: $*"; }
 
 cleanup() {
     if [ -n "${SERVER_PID:-}" ]; then
@@ -209,6 +212,45 @@ else
     fail "request after an early-ended stream failed (server alive: $(curl -sf "$URL/health" >/dev/null 2>&1 && echo yes || echo no))"
 fi
 
+# ── Test 4b: a tool call is a tool call under DFlash too ──────────────────
+# The DFlash bridge used a bare detokenizer, so the model's `<tool_call>` block reached
+# the client as content, with no `tool_calls` and `finish_reason: "stop"`. The tokens now
+# go through the same handler the standard path uses. Whether the model calls the tool is
+# a capability, not a contract, so a reply without any tool-call shape reports SKIP.
+log "Test 4b: a tool call under DFlash arrives as tool_calls, not as text"
+TOOLS='[{"type":"function","function":{"name":"get_weather","description":"Get the current weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]'
+TOOL_RESP=$(curl -sf --max-time 180 -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MAIN_MODEL\",\"max_tokens\":120,\"temperature\":0,\"tools\":$TOOLS,\"messages\":[{\"role\":\"system\",\"content\":\"You are a weather kiosk. Call get_weather for any weather question and say nothing else.\"},{\"role\":\"user\",\"content\":\"What is the weather in Paris right now?\"}]}" 2>/dev/null || echo "")
+TOOL_NAME=$(echo "$TOOL_RESP" | jq -r '.choices[0].message.tool_calls[0].function.name // empty' 2>/dev/null || echo "")
+TOOL_CONTENT=$(echo "$TOOL_RESP" | jq -r '.choices[0].message.content // empty' 2>/dev/null || echo "")
+TOOL_FINISH=$(echo "$TOOL_RESP" | jq -r '.choices[0].finish_reason // empty' 2>/dev/null || echo "")
+if [ "$TOOL_NAME" = "get_weather" ] && [ "$TOOL_FINISH" = "tool_calls" ]; then
+    pass "DFlash tool call parsed: tool_calls[0]=get_weather, finish_reason=tool_calls"
+elif echo "$TOOL_CONTENT" | grep -q "tool_call\|get_weather"; then
+    fail "DFlash handed the tool call over as text: $(echo "$TOOL_CONTENT" | head -c 120)"
+else
+    skip "model did not emit a tool call (capability, not contract): $(echo "$TOOL_CONTENT" | head -c 80)"
+fi
+
+# ── Test 4c: a drafted block that is only partly accepted keeps the state right ──
+# Qwen3.5's recurrent layers could not be rolled back after a partial acceptance, so the
+# rejected drafts stayed in their state and every answer degenerated after the first block
+# ("Paris,\n,\n,\n,…"). The earlier tests only check that something came back; this one
+# checks that a list-shaped answer is still a list. Greedy, so the reply is deterministic.
+log "Test 4c: generation stays coherent past the first drafted block"
+COHERENT=$(curl -sf --max-time 180 -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MAIN_MODEL\",\"max_tokens\":120,\"temperature\":0,\"messages\":[{\"role\":\"user\",\"content\":\"List five European capitals with their countries, one per line.\"}]}" 2>/dev/null || echo "")
+COHERENT_CONTENT=$(echo "$COHERENT" | jq -r '.choices[0].message.content // empty' 2>/dev/null || echo "")
+CAPITALS=$(echo "$COHERENT_CONTENT" | grep -c -i -E "paris|berlin|madrid|rome|london|vienna|lisbon|athens|warsaw|prague|amsterdam|brussels|dublin|stockholm|oslo|copenhagen|helsinki|budapest|bern" || true)
+REPEATED_LINES=$(echo "$COHERENT_CONTENT" | grep -v '^\s*$' | sort | uniq -d | wc -l | tr -d ' ')
+if [ "$CAPITALS" -ge 4 ] && [ "$REPEATED_LINES" -eq 0 ]; then
+    pass "coherent past the first block: $CAPITALS capitals named, no repeated line"
+else
+    fail "degenerate output ($CAPITALS capitals, $REPEATED_LINES repeated lines): $(echo "$COHERENT_CONTENT" | head -c 160 | tr '\n' ' ')"
+fi
+
 # ── Test 5: Multiple sequential requests (stability) ────────────────
 log "Test 5: Sequential request stability (3 requests)"
 
@@ -258,7 +300,7 @@ log "Speculative Decoding Test Results"
 log "  Draft:  $DRAFT_MODEL"
 log "  Main:   $MAIN_MODEL"
 log "  Tokens/round: $NUM_DRAFT_TOKENS"
-log "  Results: ${PASS} passed, ${FAIL} failed, ${TOTAL} total"
+log "  Results: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped, ${TOTAL} total"
 log "═══════════════════════════════════════"
 
 if [ "$FAIL" -gt 0 ]; then

@@ -133,6 +133,41 @@ final class DFlashStreamBridgeTests: XCTestCase {
         XCTAssertEqual(seen.stopTokens, [99])
     }
 
+    /// A stop id ends the generation whatever the handler answers, as on the standard path
+    /// (`Evaluate.swift` breaks out of the token loop on any stop id). The default
+    /// `SpellingHandler` answers `.more` to a stop token, so without this the committed
+    /// tokens after the stop id, from the same DFlash block, reached the client (#265).
+    func testStopTokenEndsGenerationAndDropsLaterTokens() async throws {
+        let (events, continuation) = AsyncStream<DFlashEvent>.makeStream()
+        continuation.yield(.token(tokenID: 5, generatedTokens: 1, acceptanceRatio: 0, cyclesCompleted: 1))
+        continuation.yield(.token(tokenID: 99, generatedTokens: 2, acceptanceRatio: 0, cyclesCompleted: 1))
+        continuation.yield(.token(tokenID: 7, generatedTokens: 3, acceptanceRatio: 0, cyclesCompleted: 1))
+        continuation.yield(.token(tokenID: 8, generatedTokens: 4, acceptanceRatio: 0, cyclesCompleted: 1))
+        continuation.yield(.summary(DFlashSummary(
+            elapsedUs: 1_000, promptTokenCount: 1, generatedTokenIDs: [5, 99, 7, 8], acceptedFromDraft: 0,
+            acceptanceRatio: 0, blockTokens: 16, cyclesCompleted: 1,
+            phaseTimingsUs: .init(prefill: 0, draft: 0, verify: 0, replay: 0))))
+        continuation.finish()
+
+        let seen = SpellingHandler.Seen()
+        var chunks: [String] = []
+        var infos: [GenerateCompletionInfo] = []
+        for await item in dflashGenerationStream(
+            events, tokenLimit: 10, stopTokenIDs: [99], handler: SpellingHandler(seen: seen))
+        {
+            switch item {
+            case .chunk(let text, _): chunks.append(text)
+            case .info(let i): infos.append(i)
+            default: break
+            }
+        }
+        XCTAssertEqual(chunks, ["t5 "], "tokens after the stop token were emitted")
+        XCTAssertEqual(seen.tokens, [5], "tokens after the stop token reached onToken")
+        XCTAssertEqual(seen.stopTokens, [99])
+        XCTAssertEqual(infos.count, 1, "the generation ends once, with one completion event")
+        XCTAssertEqual(infos.first?.stopReason, .stop)
+    }
+
     /// A handler that ends the generation (one of the model's stop strings) ends the
     /// stream: the bridge flushes it, reports the counts so far, and tears the DFlash
     /// stream down instead of draining it to max_tokens.

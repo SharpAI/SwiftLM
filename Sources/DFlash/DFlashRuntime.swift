@@ -169,13 +169,57 @@ public enum DFlashRuntime {
     /// Arm all rollback-capable caches in the target model.
     /// RecurrentRollbackCache arms for innovation-tape recording.
     /// MambaSnapshotCache takes a lazy state snapshot (O(1), no GPU copy).
-    /// Plain MambaCache instances are not checkpointed.
+    /// A plain MambaCache (the recurrent layers of a model the runtime does not treat as
+    /// hybrid, e.g. Qwen3.5's gated delta net layers) checkpoints its state, so a partial
+    /// acceptance can restore it and replay the committed tokens; see
+    /// `replayCommittedTokens`.
     public static func armTargetRollback(targetCache: [KVCache], prefixLen: Int) {
         for cache in targetCache {
             if let rollbackCache = cache as? DFlashRollbackCache {
                 rollbackCache.armRollback(prefixLen: prefixLen)
+            } else if let mambaCache = cache as? MambaCache {
+                mambaCache.checkpoint()
             }
         }
+    }
+
+    /// True when a partial acceptance cannot be rolled back in place: a plain MambaCache
+    /// restores its pre-verify checkpoint whole, so the accepted tokens have to be run
+    /// through the target again. Rollback-capable caches and attention caches do not need it.
+    public static func needsReplayAfterPartialAcceptance(_ cacheEntries: [KVCache]) -> Bool {
+        cacheEntries.contains { $0 is MambaCache && !($0 is DFlashRollbackCache) }
+    }
+
+    /// Rolls every layer back to the prefix the verify pass started from and runs the
+    /// committed tokens (the staged first token and the accepted drafts) through the target
+    /// again, so the recurrent state holds exactly the accepted prefix. Attention layers are
+    /// trimmed to the prefix first, so the replay appends them once. This is what
+    /// mlx-swift-lm's draft-model speculative loop does on a rejection with recurrent layers.
+    ///
+    /// `forward` runs the target on `[1, n]` token ids against the cache; its output is not
+    /// needed, the verify pass already captured the hidden states of the committed tokens.
+    ///
+    /// - Returns: Time spent on the replay in nanoseconds.
+    @discardableResult
+    public static func replayCommittedTokens(
+        _ cacheEntries: [KVCache],
+        prefixLen: Int,
+        committed: MLXArray,
+        forward: (MLXArray) -> MLXArray
+    ) -> Int {
+        let startNs = Int(DispatchTime.now().uptimeNanoseconds)
+        for cache in cacheEntries {
+            if cache is DFlashRollbackCache {
+                continue
+            } else if let mambaCache = cache as? MambaCache {
+                // Any n > 0 restores the checkpoint `armTargetRollback` took.
+                mambaCache.trim(1)
+            } else if cache.isTrimmable, cache.offset > prefixLen {
+                cache.trim(cache.offset - prefixLen)
+            }
+        }
+        eval(forward(committed.reshaped(1, -1)))
+        return Int(DispatchTime.now().uptimeNanoseconds) - startNs
     }
 
     /// Restore the target cache after partial acceptance of draft tokens.
@@ -207,10 +251,11 @@ public enum DFlashRuntime {
                 rollbackCache.rollback(nAccepted: acceptanceLength)
                 replayNs += Int(DispatchTime.now().uptimeNanoseconds) - startNs
             } else if let mambaCache = cache as? MambaCache {
-                // Plain MambaCache (non-rollback): no checkpoint-based rollback available.
-                // Python doesn't call checkpoint/trim on these. The state contains
-                // contributions from all verify tokens but we can't undo them.
-                // Only update the offset to reflect the accepted prefix.
+                // Plain MambaCache: this path runs when nothing was rejected (every draft
+                // accepted, or no draft at all), so the state is right as it is. Drop the
+                // checkpoint `armTargetRollback` took; a partial acceptance is handled by
+                // `replayCommittedTokens` instead.
+                mambaCache.trim(0)
                 mambaCache.offset = targetLen
             } else if cache.isTrimmable {
                 let offset = cache.offset
@@ -587,14 +632,33 @@ public enum DFlashRuntime {
             }
 
             // ── Rollback ───────────────────────────────────────
+            let prefixLen = start
             start += commitCount
             targetHidden = committedHidden
-            let replayNs = engine.rollback(
-                targetCache: targetCache,
-                targetLen: start,
-                acceptanceLength: acceptanceLen,
-                draftedTokens: blockLen - 1
-            )
+            let draftedTokens = blockLen - 1
+            let replayNs: Int
+            if draftedTokens > 0, acceptanceLen < draftedTokens,
+               needsReplayAfterPartialAcceptance(targetCache)
+            {
+                // Recurrent layers the runtime cannot roll back in place: they are
+                // restored to the pre-verify checkpoint and the committed tokens run
+                // through the target again. Before this, their state kept the rejected
+                // drafts and the generation degenerated after the first block.
+                replayNs = replayCommittedTokens(
+                    targetCache, prefixLen: prefixLen, committed: committedSegment
+                ) { ids in
+                    targetModel.dflashForwardWithCapture(
+                        inputIDs: ids, cache: targetCache, captureLayerIDs: []
+                    ).0
+                }
+            } else {
+                replayNs = engine.rollback(
+                    targetCache: targetCache,
+                    targetLen: start,
+                    acceptanceLength: acceptanceLen,
+                    draftedTokens: draftedTokens
+                )
+            }
             replayNsTotal += replayNs
             cyclesCompleted += 1
             acceptedFromDraft += acceptanceLen

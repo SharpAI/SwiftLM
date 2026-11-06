@@ -225,8 +225,14 @@ TOOL_RESP=$(curl -sf --max-time 180 -X POST "$URL/v1/chat/completions" \
 TOOL_NAME=$(echo "$TOOL_RESP" | jq -r '.choices[0].message.tool_calls[0].function.name // empty' 2>/dev/null || echo "")
 TOOL_CONTENT=$(echo "$TOOL_RESP" | jq -r '.choices[0].message.content // empty' 2>/dev/null || echo "")
 TOOL_FINISH=$(echo "$TOOL_RESP" | jq -r '.choices[0].finish_reason // empty' 2>/dev/null || echo "")
+# SKIP is reserved for a reply with no tool-call shape at all. A failed request (HTTP error
+# or timeout) and a parsed tool call with the wrong finish_reason are regressions, so FAIL.
 if [ "$TOOL_NAME" = "get_weather" ] && [ "$TOOL_FINISH" = "tool_calls" ]; then
     pass "DFlash tool call parsed: tool_calls[0]=get_weather, finish_reason=tool_calls"
+elif [ -z "$TOOL_RESP" ]; then
+    fail "tool request failed (HTTP error or timeout)"
+elif [ -n "$TOOL_NAME" ]; then
+    fail "tool call parsed but finish_reason=$TOOL_FINISH"
 elif echo "$TOOL_CONTENT" | grep -q "tool_call\|get_weather"; then
     fail "DFlash handed the tool call over as text: $(echo "$TOOL_CONTENT" | head -c 120)"
 else

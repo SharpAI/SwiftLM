@@ -2449,10 +2449,14 @@ func dflashGenerationStream<Handler: TokenLoopHandler>(
                     break
                 case .token(let tokenID, let generatedTokens, _, _):
                     generated = generatedTokens
-                    let disposition = stopTokenIDs.contains(tokenID)
+                    // A stop id ends the generation whatever the handler answers, as on the
+                    // standard path (Evaluate.swift breaks out on any stop id). Otherwise the
+                    // committed tokens after it, from the same DFlash block, kept flowing (#265).
+                    let isStop = stopTokenIDs.contains(tokenID)
+                    let disposition = isStop
                         ? handler.onStopToken(tokenID, logProbabilities: nil, emit: emit)
                         : handler.onToken(tokenID, logProbabilities: nil, emit: emit)
-                    if case .more = disposition { continue }
+                    if case .more = disposition, !isStop { continue }
                     // The handler ended the generation (one of the model's stop strings):
                     // flush it and close with the counts so far, then cancel this task so
                     // the next wait on `events` cancels the DFlash stream and its producer

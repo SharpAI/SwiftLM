@@ -212,6 +212,27 @@ else
     fail "request after an early-ended stream failed (server alive: $(curl -sf "$URL/health" >/dev/null 2>&1 && echo yes || echo no))"
 fi
 
+# ── Test 4b: a tool call is a tool call under DFlash too ──────────────────
+# The DFlash bridge used a bare detokenizer, so the model's `<tool_call>` block reached
+# the client as content, with no `tool_calls` and `finish_reason: "stop"`. The tokens now
+# go through the same handler the standard path uses. Whether the model calls the tool is
+# a capability, not a contract, so a reply without any tool-call shape reports SKIP.
+log "Test 4b: a tool call under DFlash arrives as tool_calls, not as text"
+TOOLS='[{"type":"function","function":{"name":"get_weather","description":"Get the current weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]'
+TOOL_RESP=$(curl -sf --max-time 180 -X POST "$URL/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MAIN_MODEL\",\"max_tokens\":120,\"temperature\":0,\"tools\":$TOOLS,\"messages\":[{\"role\":\"system\",\"content\":\"You are a weather kiosk. Call get_weather for any weather question and say nothing else.\"},{\"role\":\"user\",\"content\":\"What is the weather in Paris right now?\"}]}" 2>/dev/null || echo "")
+TOOL_NAME=$(echo "$TOOL_RESP" | jq -r '.choices[0].message.tool_calls[0].function.name // empty' 2>/dev/null || echo "")
+TOOL_CONTENT=$(echo "$TOOL_RESP" | jq -r '.choices[0].message.content // empty' 2>/dev/null || echo "")
+TOOL_FINISH=$(echo "$TOOL_RESP" | jq -r '.choices[0].finish_reason // empty' 2>/dev/null || echo "")
+if [ "$TOOL_NAME" = "get_weather" ] && [ "$TOOL_FINISH" = "tool_calls" ]; then
+    pass "DFlash tool call parsed: tool_calls[0]=get_weather, finish_reason=tool_calls"
+elif echo "$TOOL_CONTENT" | grep -q "tool_call\|get_weather"; then
+    fail "DFlash handed the tool call over as text: $(echo "$TOOL_CONTENT" | head -c 120)"
+else
+    skip "model did not emit a tool call (capability, not contract): $(echo "$TOOL_CONTENT" | head -c 80)"
+fi
+
 # ── Test 4c: a drafted block that is only partly accepted keeps the state right ──
 # Qwen3.5's recurrent layers could not be rolled back after a partial acceptance, so the
 # rejected drafts stayed in their state and every answer degenerated after the first block

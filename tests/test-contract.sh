@@ -578,6 +578,43 @@ else
     fail "got HTTP $CODE with error '$ERR_TYPE' (expected 400 invalid_request_error chat_template_kwargs.enable_thinking)"
 fi
 
+# ── 18. tool_choice decides which tools the model sees ───────────────────────
+# #269: the field was not decoded, so "none" and a named function changed nothing and a
+# misspelt value was a normal 200. The CI model cannot be relied on to call a tool, so this
+# reads the prompt size instead: the tools the template was given show in `prompt_tokens`.
+log "Test 18: tool_choice none and a named function narrow the tools in the prompt"
+TC_TOOLS='[{"type":"function","function":{"name":"get_weather","description":"Get weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}},{"type":"function","function":{"name":"get_time","description":"Get the current time in a timezone","parameters":{"type":"object","properties":{"tz":{"type":"string"}},"required":["tz"]}}}]'
+tc_prompt() {
+    chat "{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hi.\"}],\"max_tokens\":4,\"temperature\":0$1}" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["usage"]["prompt_tokens"])' 2>/dev/null || echo 0
+}
+P_PLAIN=$(tc_prompt "")
+P_ALL=$(tc_prompt ",\"tools\":$TC_TOOLS")
+P_NONE=$(tc_prompt ",\"tools\":$TC_TOOLS,\"tool_choice\":\"none\"")
+P_ONE=$(tc_prompt ",\"tools\":$TC_TOOLS,\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":\"get_time\"}}")
+if [ "$P_PLAIN" -gt 0 ] && [ "$P_ALL" -gt "$P_PLAIN" ] && [ "$P_NONE" = "$P_PLAIN" ]; then
+    pass "\"none\" keeps the tools out of the prompt ($P_NONE tokens, $P_ALL with them)"
+else
+    fail "\"none\" prompt is $P_NONE tokens (expected $P_PLAIN as without tools; $P_ALL with them)"
+fi
+if [ "$P_ONE" -gt "$P_PLAIN" ] && [ "$P_ONE" -lt "$P_ALL" ]; then
+    pass "a named function offers only that tool ($P_ONE tokens, $P_ALL with both)"
+else
+    fail "named-function prompt is $P_ONE tokens (expected between $P_PLAIN and $P_ALL)"
+fi
+
+log "Test 18b: a tool_choice the API does not have is a 400 that names the param"
+for BAD in '"sometimes"' '{"type":"function","function":{"name":"get_stock"}}'; do
+    CODE=$(curl -s -o /tmp/SwiftLM-contract-toolchoice.json -w '%{http_code}' "$URL/v1/chat/completions" \
+        -H 'Content-Type: application/json' -d "{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":4,\"tools\":$TC_TOOLS,\"tool_choice\":$BAD}")
+    ERR_TYPE=$(python3 -c 'import json; e=json.load(open("/tmp/SwiftLM-contract-toolchoice.json"))["error"]; print(e.get("type"), e.get("param"))' 2>/dev/null || echo "unparseable")
+    if [ "$CODE" = "400" ] && [ "$ERR_TYPE" = "invalid_request_error tool_choice" ]; then
+        pass "400 invalid_request_error naming param 'tool_choice' for $BAD"
+    else
+        fail "got HTTP $CODE with error '$ERR_TYPE' for $BAD (expected 400 invalid_request_error tool_choice)"
+    fi
+done
+
 log "═══════════════════════════════════════"
 log "Results: $PASS passed, $FAIL failed, $SKIP skipped, $TOTAL total"
 log "═══════════════════════════════════════"

@@ -184,6 +184,7 @@ for await (const chunk of stream) {
 | `stop` | string[] | [] | Stop sequences |
 | `response_format` | object | none | `{"type": "json_object"}` for JSON mode |
 | `tools` | array | none | Tool/function definitions |
+| `tool_choice` | string or object | `auto` | `none` keeps the model from calling tools, `{"type": "function", "function": {"name": "..."}}` offers only that function. `required` is accepted but handled like `auto` |
 | `enable_thinking` | bool | false | Enable `<think>` reasoning tokens |
 | `chat_template_kwargs` | object | none | Passed to the chat template as sent (e.g. `{"thinking": true}`, `{"reasoning_effort": "high"}`) |
 

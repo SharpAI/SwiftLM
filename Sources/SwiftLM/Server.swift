@@ -2604,8 +2604,20 @@ func handleChatCompletion(
         systemPromptText = "JSON_MODE:" + systemPromptText
     }
 
+    // `tool_choice` decides which of the request's tools the model gets to see.
+    let offeredTools: [ChatCompletionRequest.ToolDef]?
+    do {
+        offeredTools = try chatReq.offeredTools()
+    } catch let error as DecodingError {
+        return invalidRequestResponse(error)
+    }
+    if chatReq.toolChoice == .required {
+        // Nothing here can force a call yet. Say so in the log instead of staying silent.
+        print("[SwiftLM] tool_choice \"required\" is not enforced, handling it as \"auto\"")
+    }
+
     // Convert OpenAI tools format → [String: any Sendable] for UserInput
-    let toolSpecs: [[String: any Sendable]]? = chatReq.tools?.map { tool in
+    let toolSpecs: [[String: any Sendable]]? = offeredTools?.map { tool in
         var spec: [String: any Sendable] = ["type": tool.type]
         var fn: [String: any Sendable] = ["name": tool.function.name]
         if let desc = tool.function.description { fn["description"] = desc }
@@ -3028,7 +3040,8 @@ func handleChatCompletion(
             startGeneration: startGeneration, modelId: modelId, stopSequences: stopSequences,
             includeUsage: includeUsage, promptTokenCount: promptTokenCount,
             enableThinking: enableThinking, thinkingPreOpened: thinkingPreOpened,
-            jsonMode: jsonMode, tokenEcho: config.tokenEcho, slot: slot,
+            jsonMode: jsonMode, tokenEcho: config.tokenEcho,
+            allowedToolCalls: chatReq.allowedToolCalls, slot: slot,
             stats: stats, genStart: genStart, prefillStart: prefillStart,
             emitPrefillProgress: emitPrefillProgress
         )
@@ -3044,6 +3057,7 @@ func handleChatCompletion(
                 stream: stream, modelId: modelId, stopSequences: stopSequences,
                 promptTokenCount: promptTokenCount, enableThinking: enableThinking,
                 thinkingPreOpened: thinkingPreOpened, jsonMode: jsonMode, tokenEcho: config.tokenEcho,
+                allowedToolCalls: chatReq.allowedToolCalls,
                 slot: slot, stats: stats, genStart: genStart, prefillStart: prefillStart,
                 onPrefillDone: onPrefillDone
             )
@@ -3254,6 +3268,7 @@ func handleChatStreaming(
     thinkingPreOpened: Bool = false,
     jsonMode: Bool = false,
     tokenEcho: Bool = true,
+    allowedToolCalls: Set<String>? = nil,
     slot: GenerationSlot,
     stats: ServerStats,
     genStart: Date,
@@ -3496,6 +3511,11 @@ func handleChatStreaming(
                     // If tracker buffer is holding a partial tag, nothing to emit yet — that's fine.
                 }
 
+            case .toolCall(let tc) where allowedToolCalls?.contains(tc.function.name) == false:
+                // `tool_choice` ruled this call out: "none", or another function was named.
+                // Handled like a rejected call below: logged, not sent.
+                print("[SwiftLM] Dropped tool call: tool=\(tc.function.name) is not allowed by tool_choice")
+
             case .toolCall(let tc):
                 hasToolCalls = true
                 let argsJson = serializeToolCallArgs(tc.function.arguments)
@@ -3641,6 +3661,7 @@ func handleChatNonStreaming(
     thinkingPreOpened: Bool = false,
     jsonMode: Bool = false,
     tokenEcho: Bool = true,
+    allowedToolCalls: Set<String>? = nil,
     slot: GenerationSlot,
     stats: ServerStats,
     genStart: Date,
@@ -3685,6 +3706,9 @@ func handleChatNonStreaming(
                 print(text, terminator: "")
                 fflush(stdout)
             }
+        case .toolCall(let tc) where allowedToolCalls?.contains(tc.function.name) == false:
+            // See the matching comment in `handleChatStreaming`: ruled out by `tool_choice`.
+            print("[SwiftLM] Dropped tool call: tool=\(tc.function.name) is not allowed by tool_choice")
         case .toolCall(let tc):
             let argsJson = serializeToolCallArgs(tc.function.arguments)
             collectedToolCalls.append(ToolCallResponse(
@@ -4985,6 +5009,7 @@ struct ChatCompletionRequest: Decodable {
     let frequencyPenalty: Double?
     let presencePenalty: Double?
     let tools: [ToolDef]?
+    let toolChoice: ToolChoice?
     let stop: StopSequences?
     let seed: Int?
     let streamOptions: StreamOptions?
@@ -5019,6 +5044,81 @@ struct ChatCompletionRequest: Decodable {
         case enableThinking = "enable_thinking"
         case thinkingBudget = "thinking_budget"
         case kvBits = "kv_bits"
+        case toolChoice = "tool_choice"
+    }
+
+    /// The tools this request offers the model once `tool_choice` is applied: none of
+    /// them for "none", only the named one for a function choice, all of them otherwise.
+    /// A choice that names a function `tools` does not declare is a client error, thrown
+    /// as the decode error a bad `tool_choice` value gives so both get the same 400.
+    func offeredTools() throws -> [ToolDef]? {
+        switch toolChoice {
+        case .noTools?:
+            return nil
+        case .function(let name)?:
+            guard let tool = tools?.first(where: { $0.function.name == name }) else {
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: [CodingKeys.toolChoice],
+                    debugDescription: "Invalid value for 'tool_choice': the function '\(name)' is not in 'tools'."))
+            }
+            return [tool]
+        case .auto?, .required?, nil:
+            return tools
+        }
+    }
+
+    /// The function names a reply may call, or nil when `tool_choice` does not narrow
+    /// them. Leaving a tool out of the prompt does not stop a model from calling it,
+    /// most of all when the history already holds such calls.
+    var allowedToolCalls: Set<String>? {
+        switch toolChoice {
+        case .noTools?: return []
+        case .function(let name)?: return [name]
+        case .auto?, .required?, nil: return nil
+        }
+    }
+}
+
+/// OpenAI's `tool_choice`: "none", "auto" or "required", or an object that names one
+/// function. The field was not decoded at all, so "none" could still be answered with a
+/// tool call and a misspelt value went unnoticed.
+enum ToolChoice: Decodable, Equatable {
+    /// "none": the model answers in text. Not `.none`, which reads as nil on an optional.
+    case noTools
+    /// "auto", also what an absent field means: the model decides.
+    case auto
+    /// "required": accepted and handled like "auto". Nothing here can force a call yet.
+    case required
+    /// `{"type":"function","function":{"name":"get_weather"}}`: only this function.
+    case function(String)
+
+    private struct Named: Decodable {
+        struct Function: Decodable { let name: String }
+        let type: String
+        let function: Function
+    }
+
+    init(from decoder: Swift.Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let mode = try? container.decode(String.self) {
+            switch mode {
+            case "none": self = .noTools
+            case "auto": self = .auto
+            case "required": self = .required
+            default:
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Invalid value for 'tool_choice': '\(mode)'. Expected \"none\", \"auto\", \"required\" or a function object.")
+            }
+            return
+        }
+        let named = try container.decode(Named.self)
+        guard named.type == "function" else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid value for 'tool_choice': the object type '\(named.type)' is not supported, only 'function'.")
+        }
+        self = .function(named.function.name)
     }
 }
 

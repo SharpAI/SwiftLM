@@ -2635,15 +2635,10 @@ func handleChatCompletion(
     let genStart = Date()
 
     // Pass enable_thinking to the Jinja chat template via additionalContext.
-    // Precedence: top-level request > per-request chat_template_kwargs > server --thinking flag
-    var enableThinking: Bool
-    if let explicitTopLevel = chatReq.enableThinking {
-        enableThinking = explicitTopLevel
-    } else if let perRequest = chatReq.chatTemplateKwargs?["enable_thinking"]?.value as? Bool {
-        enableThinking = perRequest  // per-request override wins
-    } else {
-        enableThinking = config.thinking  // fall back to server --thinking flag
-    }
+    var enableThinking = resolveThinking(
+        topLevel: chatReq.enableThinking,
+        kwarg: chatReq.chatTemplateKwargs?["enable_thinking"]?.value as? Bool,
+        serverFlag: config.thinking)
 
     // Workaround for Gemma-4 Tool-Call bug (Resolves https://github.com/SharpAI/SwiftLM/issues/69)
     // If tools are present, the Gemma-4 Jinja template appends an anti-thinking prefix
@@ -4498,6 +4493,12 @@ func checkStopSequences(_ text: String, stopSequences: [String], lookback: Int? 
     }
     guard let earliest else { return nil }
     return (String(text[text.startIndex..<earliest.index]), earliest.stop)
+}
+
+/// Whether a chat request thinks: the top-level `enable_thinking` wins, then
+/// `chat_template_kwargs.enable_thinking`, then the server's `--thinking` flag.
+func resolveThinking(topLevel: Bool?, kwarg: Bool?, serverFlag: Bool) -> Bool {
+    topLevel ?? kwarg ?? serverFlag
 }
 
 /// The `additionalContext` a chat request hands to its chat template: every

@@ -615,6 +615,24 @@ for BAD in '"sometimes"' '{"type":"function","function":{"name":"get_stock"}}'; 
     fi
 done
 
+# ── 19. enable_thinking: the top-level field wins over the kwarg ─────────────
+# #263: the order (top-level field, then chat_template_kwargs, then --thinking) was inline
+# in the handler with no test that saw it, so two swapped branches stayed green. The CI
+# model's template ignores enable_thinking, so the verdict is read from the request line
+# the server logs. The server under test runs with --thinking.
+log "Test 19: enable_thinking precedence"
+thinking_of() {
+    chat "{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":4$1}" >/dev/null || true
+    grep -o 'slot_launch: id 0 | prompt=[0-9]*t | thinking=[a-z]*' "$SERVER_LOG" | tail -1 | grep -o '[a-z]*$'
+}
+expect_thinking() {
+    local GOT; GOT=$(thinking_of "$3")
+    if [ "$GOT" = "$1" ]; then pass "$2: thinking=$GOT"; else fail "$2: thinking=$GOT (expected $1)"; fi
+}
+expect_thinking false "top-level false over kwarg true" ',"enable_thinking":false,"chat_template_kwargs":{"enable_thinking":true}'
+expect_thinking true "top-level true over kwarg false" ',"enable_thinking":true,"chat_template_kwargs":{"enable_thinking":false}'
+expect_thinking false "kwarg false over --thinking" ',"chat_template_kwargs":{"enable_thinking":false}'
+
 log "═══════════════════════════════════════"
 log "Results: $PASS passed, $FAIL failed, $SKIP skipped, $TOTAL total"
 log "═══════════════════════════════════════"

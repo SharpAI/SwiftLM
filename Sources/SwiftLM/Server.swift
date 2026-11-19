@@ -3525,9 +3525,6 @@ func handleChatStreaming(
                 // contain sensitive argument text.
                 print("[SwiftLM] Rejected tool call: reason=\(rejection.reason) tool=\(rejection.toolName ?? "?") detail=\(rejection.detail ?? "n/a")")
 
-            case .steering:
-                // SwiftLM never enables steering; a steering event carries no output to emit.
-                break
             case .info(let info):
                 // `.info` is the producer's last yield, so the cache is no longer written once
                 // it arrives. The prompt is saved here, not on the first chunk: that raced the
@@ -3550,8 +3547,10 @@ func handleChatStreaming(
                     switch info.stopReason {
                     case .length:
                         reason = "length"
-                    case .cancelled, .stop, .steered, .interrupted:
+                    case .cancelled, .stop:
                         reason = hasToolCalls ? "tool_calls" : "stop"
+                    @unknown default:
+                        reason = "stop"
                     }
                     // A JSON-mode reply shorter than the flush threshold is still in the
                     // buffer; it goes out before the finish chunk.
@@ -3718,9 +3717,6 @@ func handleChatNonStreaming(
         case .rejectedToolCall(let rejection):
             // See the matching comment in `handleChatStreaming`: log only, no wire shape.
             print("[SwiftLM] Rejected tool call: reason=\(rejection.reason) tool=\(rejection.toolName ?? "?") detail=\(rejection.detail ?? "n/a")")
-        case .steering:
-            // SwiftLM never enables steering; a steering event carries no output to emit.
-            break
         case .info(let info):
             // The producer's last yield; see the matching comment in `handleChatStreaming`.
             // The stop-sequence `break` above exits before `.info`; the paths that save at the
@@ -4054,9 +4050,6 @@ func handleTextStreaming(
             case .toolCall, .rejectedToolCall:
                 // Text-completion endpoint: tool calling has no wire representation here.
                 break
-            case .steering:
-                // SwiftLM never enables steering; a steering event carries no output to emit.
-                break
             case .info(let info):
                 // The chunk count undercounts: tokens the decoder buffers (tool-call
                 // bodies, partial text) emit no chunk. `info` carries the real count.
@@ -4070,7 +4063,9 @@ func handleTextStreaming(
                     switch info.stopReason {
                     case .length:
                         reason = "length"
-                    case .cancelled, .stop, .steered, .interrupted:
+                    case .cancelled, .stop:
+                        reason = "stop"
+                    @unknown default:
                         reason = "stop"
                     }
                     if !heldStopTail.isEmpty {
@@ -4135,9 +4130,6 @@ func handleTextNonStreaming(
             if completionTokenCount % 8 == 0 {
                 try? await Task.sleep(for: .microseconds(50))
             }
-        case .steering:
-            // SwiftLM never enables steering; a steering event carries no output to emit.
-            break
         case .info(let info):
             generationStopReason = info.stopReason
             completionTokenCount = info.generationTokenCount  // real count; see handleChatStreaming

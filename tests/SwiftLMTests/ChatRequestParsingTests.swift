@@ -380,4 +380,48 @@ final class ChatRequestParsingTests: XCTestCase {
         XCTAssertEqual(context["enable_thinking"] as? Bool, true)
         XCTAssertEqual(context.count, 1)
     }
+
+    // MARK: - chat_template_kwargs cannot replace the tokenizer's own variables (#264)
+
+    /// Kwargs are merged into the template context after `messages`, `tools` and
+    /// `add_generation_prompt`, so a kwarg with one of those names replaced the value the
+    /// server built. The handler answers such a request with a 400 that names the key.
+    func testReservedTemplateKwargIsFound() throws {
+        for name in ["messages", "tools", "add_generation_prompt"] {
+            let req = try decode("""
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"reasoning_effort": "low", "\(name)": []}
+            }
+            """)
+            XCTAssertEqual(reservedTemplateKwarg(in: req.chatTemplateKwargs), name)
+        }
+    }
+
+    func testOrdinaryTemplateKwargsAreNotReserved() throws {
+        let req = try decode("""
+        {
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": {
+                "enable_thinking": false, "thinking": true, "reasoning_effort": "high",
+                "message": "x", "tool": "y", "Messages": [], "bos_token": "<s>"
+            }
+        }
+        """)
+        XCTAssertNil(reservedTemplateKwarg(in: req.chatTemplateKwargs))
+        XCTAssertNil(reservedTemplateKwarg(in: nil))
+        XCTAssertNil(reservedTemplateKwarg(in: [:]))
+    }
+
+    /// With more than one reserved name the first in alphabetical order is reported, so the
+    /// error does not change with dictionary order from one run to the next.
+    func testReservedTemplateKwargIsStableWhenSeveralAreSent() throws {
+        let req = try decode("""
+        {
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": {"tools": [], "messages": [], "add_generation_prompt": false}
+        }
+        """)
+        XCTAssertEqual(reservedTemplateKwarg(in: req.chatTemplateKwargs), "add_generation_prompt")
+    }
 }

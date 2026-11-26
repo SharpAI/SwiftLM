@@ -633,6 +633,37 @@ expect_thinking false "top-level false over kwarg true" ',"enable_thinking":fals
 expect_thinking true "top-level true over kwarg false" ',"enable_thinking":true,"chat_template_kwargs":{"enable_thinking":false}'
 expect_thinking false "kwarg false over --thinking" ',"chat_template_kwargs":{"enable_thinking":false}'
 
+# ── 20. chat_template_kwargs: reserved names, and nulls inside arrays ────────
+# #264: kwargs are merged into the template context after `messages`, `tools` and
+# `add_generation_prompt`, so a kwarg with one of those names replaced what the server had
+# built for the request. And a null inside an array was dropped on the way to the template,
+# which moved the later elements up by one. The CI model's template prints tools as JSON,
+# so the second half reads the prompt size of a tool whose enum has a null in it.
+log "Test 20: a chat_template_kwargs name the server sets itself is a 400 that names it"
+for NAME in messages tools add_generation_prompt; do
+    CODE=$(curl -s -o /tmp/SwiftLM-contract-reserved.json -w '%{http_code}' "$URL/v1/chat/completions" \
+        -H 'Content-Type: application/json' -d "{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":4,\"chat_template_kwargs\":{\"$NAME\":[]}}")
+    ERR_TYPE=$(python3 -c 'import json; e=json.load(open("/tmp/SwiftLM-contract-reserved.json"))["error"]; print(e.get("type"), e.get("param"))' 2>/dev/null || echo "unparseable")
+    if [ "$CODE" = "400" ] && [ "$ERR_TYPE" = "invalid_request_error chat_template_kwargs.$NAME" ]; then
+        pass "400 invalid_request_error naming param 'chat_template_kwargs.$NAME'"
+    else
+        fail "got HTTP $CODE with error '$ERR_TYPE' for $NAME (expected 400 invalid_request_error chat_template_kwargs.$NAME)"
+    fi
+done
+
+log "Test 20b: a null inside an array reaches the template in place"
+enum_prompt() {
+    chat "{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hi.\"}],\"max_tokens\":4,\"temperature\":0,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"set_unit\",\"description\":\"Set the unit\",\"parameters\":{\"type\":\"object\",\"properties\":{\"unit\":{\"enum\":$1}}}}}]}" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["usage"]["prompt_tokens"])' 2>/dev/null || echo 0
+}
+P_TWO=$(enum_prompt '["c","f"]')
+P_NULL=$(enum_prompt '["c",null,"f"]')
+if [ "$P_TWO" -gt 0 ] && [ "$P_NULL" -gt "$P_TWO" ]; then
+    pass "the enum keeps its null ($P_NULL prompt tokens, $P_TWO without it)"
+else
+    fail "an enum with a null in it is $P_NULL prompt tokens (expected more than $P_TWO, the same enum without the null)"
+fi
+
 log "═══════════════════════════════════════"
 log "Results: $PASS passed, $FAIL failed, $SKIP skipped, $TOTAL total"
 log "═══════════════════════════════════════"

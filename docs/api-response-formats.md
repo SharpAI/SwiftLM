@@ -186,7 +186,7 @@ for await (const chunk of stream) {
 | `tools` | array | none | Tool/function definitions |
 | `tool_choice` | string or object | `auto` | `none` keeps the model from calling tools, `{"type": "function", "function": {"name": "..."}}` offers only that function. `required` is accepted but handled like `auto` |
 | `enable_thinking` | bool | false | Enable `<think>` reasoning tokens |
-| `chat_template_kwargs` | object | none | Passed to the chat template as sent (e.g. `{"thinking": true}`, `{"reasoning_effort": "high"}`) |
+| `chat_template_kwargs` | object | none | Passed to the chat template as sent (e.g. `{"thinking": true}`, `{"reasoning_effort": "high"}`). 400 for a non-boolean `enable_thinking` and for the names the server sets itself (`messages`, `tools`, `add_generation_prompt`). A `null` inside a list keeps its place, a `null` object value is dropped |
 
 ---
 

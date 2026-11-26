@@ -241,8 +241,9 @@ private struct TransformersTokenizerBridge: MLXLMCommon.Tokenizer, Sendable {
             // Issue #168: JSON `null` in tool schemas decodes to NSNull via AnyCodable.
             // swift-jinja's Value.init(any:) has no NSNull case, so a single null anywhere
             // in a tool spec aborted the whole render with a misleading "Optional<Any>"
-            // conversion error that was then mislabeled as a broken template. Strip nulls
-            // (and unwrap nested optionals) before handing anything to the template engine.
+            // conversion error that was then mislabeled as a broken template. Take the
+            // NSNulls out (and unwrap nested optionals) before handing anything to the
+            // template engine; `sanitizeForJinja` says what happens to each kind of null.
             return try upstream.applyChatTemplate(
                 messages: messages.map { $0.mapValuesDeep(sanitizeForJinja) },
                 tools: tools?.map { $0.mapValuesDeep(sanitizeForJinja) },
@@ -259,8 +260,6 @@ private struct TransformersTokenizerBridge: MLXLMCommon.Tokenizer, Sendable {
     }
 }
 
-/// Returns `nil` when the value must be dropped (JSON `null` / NSNull), otherwise a
-/// structure with every nested null removed. See `TransformersTokenizerBridge.applyChatTemplate`.
 /// True when a VLM load failed because the checkpoint doesn't match the VLM code:
 /// its config doesn't decode, its weights don't line up with the module tree, or the
 /// factory doesn't know the model/processor type. Only these justify retrying an
@@ -288,6 +287,17 @@ enum TurboKVNotice {
     nonisolated(unsafe) static var warnedNoLayers = false
 }
 
+/// What a JSON `null` inside an array is handed to the template as: a real `nil`, which
+/// swift-jinja reads as `none`. `NSNull` itself is a type it cannot convert.
+let jinjaNone: any Sendable = Optional<Bool>.none as any Sendable
+
+/// Makes a decoded JSON value safe for the chat template engine. A JSON `null` decodes to
+/// `NSNull`, which swift-jinja cannot convert (#168), so nulls are dealt with here:
+/// - a dictionary entry whose value is null is dropped, the template sees a missing key;
+/// - an array element that is null stays where it is and reaches the template as `none`.
+///   Dropping it would move every later element up by one (#264).
+/// Returns `nil` only when the value itself is null. See
+/// `TransformersTokenizerBridge.applyChatTemplate`.
 func sanitizeForJinja(_ value: any Sendable) -> (any Sendable)? {
     if value is NSNull { return nil }
     let mirror = Mirror(reflecting: value)
@@ -305,7 +315,7 @@ func sanitizeForJinja(_ value: any Sendable) -> (any Sendable)? {
         return out
     }
     if let arr = value as? [Any] {
-        return arr.compactMap { sanitizeForJinja($0 as any Sendable) }
+        return arr.map { sanitizeForJinja($0 as any Sendable) ?? jinjaNone }
     }
     return value
 }
@@ -2548,6 +2558,16 @@ func handleChatCompletion(
         )
     }
 
+    // ── chat_template_kwargs cannot replace what the server hands the template itself ──
+    if let name = reservedTemplateKwarg(in: chatReq.chatTemplateKwargs) {
+        let errBody = "{\"error\":{\"message\":\"'chat_template_kwargs.\(name)' is set by the server and cannot be overridden.\",\"type\":\"invalid_request_error\",\"param\":\"chat_template_kwargs.\(name)\"}}"
+        return Response(
+            status: .badRequest,
+            headers: jsonHeaders(),
+            body: .init(byteBuffer: ByteBuffer(string: errBody))
+        )
+    }
+
     // ── chat_template_kwargs is free-form JSON, but enable_thinking stays a boolean ──
     // It decides the precedence below, so a string or a number there is a client error,
     // answered the way the whole field used to be answered before it took other types.
@@ -4506,11 +4526,22 @@ func resolveThinking(topLevel: Bool?, kwarg: Bool?, serverFlag: Bool) -> Bool {
 /// value the request's precedence rules decided (top-level field, then the kwarg, then the
 /// server flag). Templates read their own names here (`thinking`, `reasoning_effort`,
 /// `model_identity`, …), so nothing but that one key is interpreted by the server.
-/// Nulls inside the values are stripped later by `sanitizeForJinja`, as for tools.
+/// Nulls inside the values are handled later by `sanitizeForJinja`, as for tools.
 func chatTemplateContext(kwargs: [String: AnyCodable]?, enableThinking: Bool) -> [String: any Sendable] {
     var context = AnyCodable.toSendable(kwargs) ?? [:]
     context["enable_thinking"] = enableThinking
     return context
+}
+
+/// The names the tokenizer fills in itself when it renders a chat template. Kwargs are
+/// merged into the template context after them, so a `chat_template_kwargs` entry with one
+/// of these names would replace the conversation, the tool list or the generation prompt
+/// flag the server built for the request (#264).
+let reservedTemplateKwargs: Set<String> = ["messages", "tools", "add_generation_prompt"]
+
+/// The first reserved name a request's `chat_template_kwargs` uses, if any.
+func reservedTemplateKwarg(in kwargs: [String: AnyCodable]?) -> String? {
+    kwargs?.keys.sorted().first { reservedTemplateKwargs.contains($0) }
 }
 
 /// The sampler seed for a request `seed`. OpenAI's `seed` is a plain integer, so negative

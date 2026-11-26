@@ -3549,6 +3549,8 @@ func handleChatStreaming(
                         reason = "length"
                     case .cancelled, .stop:
                         reason = hasToolCalls ? "tool_calls" : "stop"
+                    @unknown default:
+                        reason = "stop"
                     }
                     // A JSON-mode reply shorter than the flush threshold is still in the
                     // buffer; it goes out before the finish chunk.
@@ -4062,6 +4064,8 @@ func handleTextStreaming(
                     case .length:
                         reason = "length"
                     case .cancelled, .stop:
+                        reason = "stop"
+                    @unknown default:
                         reason = "stop"
                     }
                     if !heldStopTail.isEmpty {
